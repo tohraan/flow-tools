@@ -24,9 +24,10 @@ It was originally built to work entirely without a physical keyboard — every k
 ## Features
 
 - 🚀 **One command, prompt to image** — `flow-generate.mjs` opens your project, types the prompt, hits generate, waits for completion, and logs the run
+- 🪪 **Actually working identity lock** — `--reference` inserts a real inline `@mention`, the mechanism that binds a prompt to a specific uploaded face/asset (a loose "+" attachment does not — see [Known gotchas](#known-gotchas))
 - 🖱️ **Real input, not fake events** — clicks and keystrokes go through CDP's `Input` domain, so they register on apps that ignore plain JS `.click()` / synthetic events
 - 📎 **Attach reference images without a file picker** — injects files straight into `<input type=file>` via `DOM.setFileInputFiles`
-- ⬇️ **Scripted downloads at any resolution** (1K / 2K / 4K) — no manual right-click required
+- ⬇️ **Scripted downloads at any resolution** (1K / 2K / 4K) — no manual right-click required, and the file is moved to your output folder automatically
 - 📝 **Automatic run history** — every generation is logged with its prompt, timing, and result
 - 🪶 **Zero dependencies** — built entirely on Node 22's built-in `fetch` and `WebSocket`
 
@@ -63,6 +64,23 @@ node flow-generate.mjs --file prompt.txt --label "cyberpunk-alley" --download 0
 
 Output: the generated grid is screenshotted, image #0 is downloaded at 2K, and the run is appended to `~/Flow/build-log.md`.
 
+### Identity-locked generation (reusing a specific face/asset)
+
+Attaching an image via the "+" button alone does **not** reliably lock identity — it influences the generation but doesn't bind to the person described in your prompt. The mechanism that actually works is an inline `@mention`, the same one Flow's own UI uses when you type `@` in the prompt box:
+
+```bash
+# 1. Upload the reference image once (via Flow's UI, or inject it directly — no file picker needed)
+node cdp.mjs set-file-input "input[type=file]" /path/to/your-face.jpg
+
+# 2. Write a prompt that assumes the mention precedes it
+echo ' is the exact identity reference. A cinematic portrait, golden hour lighting...' > portrait.txt
+
+# 3. Generate with --reference matching the uploaded asset's filename (or any substring of it)
+node flow-generate.mjs --file portrait.txt --label "portrait-1" --reference "your-face" --download 0
+```
+
+`--reference` types `@`, searches for your term, selects the match from Flow's picker, and clicks "Add to prompt" — inserting it as an inline mention — before typing the rest of your prompt text right after it.
+
 ## Why a dedicated Chrome profile?
 
 As of late 2025, Chrome **silently refuses** to open the remote-debugging port against your normal default profile — an anti-session-hijacking protection, with no error shown. `flow-launch-chrome.sh` launches a separate automation-only profile instead (`./chrome-profile/`, gitignored — it holds real session cookies, never commit it). You log in once; it's remembered after that.
@@ -82,6 +100,7 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 | `--download <N>` | Download the Nth generated image (0-indexed, left→right) |
 | `--res <1K\|2K\|4K>` | Resolution for `--download` (default `2K`) |
 | `--project <url>` | Flow project URL (else: `FLOW_PROJECT_URL` env var, else `.flow-project-url`) |
+| `--reference <name>` | Insert an inline `@mention` of an already-uploaded asset before the prompt text — the real identity-lock mechanism (see above) |
 
 ### `cdp.mjs` — low-level toolkit
 
@@ -96,7 +115,7 @@ node cdp.mjs type --file <path> | "<text>"      # insert text into whatever's fo
 node cdp.mjs key <KeyName>                      # e.g. Enter, Escape, Tab
 node cdp.mjs rightclick-text "<text>"           # opens context menus
 node cdp.mjs set-file-input "<selector>" <path> # inject a file, bypassing the OS picker
-node cdp.mjs set-download-dir <dir>             # browser-wide download redirect
+node cdp.mjs set-download-dir <dir>             # browser-wide download redirect — unreliable, see gotcha #3
 ```
 
 All commands accept `--port 9222` and `--match <tab-url-substring>` (default: any tab with `flow.google.com`).
@@ -124,8 +143,8 @@ No browser automation framework, no binary downloads, no bundler — just the pr
 
 1. **`element.click()` does not register** on Flow's UI — always dispatch a real `Input.dispatchMouseEvent` at the element's actual coordinates.
 2. **Right-click opens an in-page custom context menu**, not a native OS one — fully scriptable.
-3. **Downloads need `Browser.setDownloadBehavior`** (browser-level) — the per-page variant doesn't reliably apply.
-4. **Identity-lock prompts** ("use the attached reference image 'X'") only work if an actual image/Character named X is uploaded and attached — a name in plain text does nothing by itself. Use `set-file-input` to attach one.
+3. **`Browser.setDownloadBehavior` with a custom `downloadPath` does not actually work** — it returns success but Chrome silently keeps saving to its real default (`~/Downloads`), confirmed by inspecting `chrome://downloads`'s underlying records. `flow-generate.mjs` doesn't fight this: it lets the download land normally, then detects and moves the new file itself. Don't trust `cdp.mjs set-download-dir` without verifying.
+4. **Identity-lock prompts need a real inline `@mention`, not a loose attachment.** Attaching an image via the "+" button influences the generation (outputs become consistent with *each other*) but does not bind it to the person described in the prompt text — confirmed by generating with an attached photo and getting a consistent but completely different face across all 4 outputs. The fix is `--reference`, which types `@`, selects the asset from Flow's picker, and inserts it as an inline mention — that's what actually locks identity. See [Identity-locked generation](#identity-locked-generation-reusing-a-specific-faceasset) above.
 
 ## Contributing
 

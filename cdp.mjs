@@ -11,6 +11,11 @@
 //   node cdp.mjs type --file <path> | "<text>"       Input.insertText into focused element
 //   node cdp.mjs key <KeyName>                       e.g. Enter, Escape, Tab
 //   node cdp.mjs rightclick-text "<text>"            dispatch a right-click (contextmenu) on match
+//   node cdp.mjs set-file-input "<selector>" <path>  inject a file into an <input type=file>, bypassing the OS picker
+//   node cdp.mjs set-download-dir <dir>              CAUTION: unreliable — returns success but Chrome often
+//                                                     keeps saving to its real default anyway. Verify via
+//                                                     chrome://downloads before trusting it. flow-generate.mjs
+//                                                     works around this by moving the file after the fact instead.
 //
 // All commands take optional --port 9222 --match <substring of tab title/url>
 
