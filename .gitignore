@@ -1,0 +1,13 @@
+# Dedicated automation Chrome profile — contains real Google session cookies. Never commit.
+chrome-profile/
+
+# Your personal default Flow project — never commit. Others set their own via
+# --project, FLOW_PROJECT_URL, or their own .flow-project-url.
+.flow-project-url
+
+# Scratch screenshots from debugging
+*.png
+!docs/**/*.png
+
+.DS_Store
+node_modules/
