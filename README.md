@@ -90,7 +90,9 @@ Heads up: using `--reference` appears to also trigger Flow to build a full named
 
 ## Why a dedicated Chrome profile?
 
-As of late 2025, Chrome **silently refuses** to open the remote-debugging port against your normal default profile — an anti-session-hijacking protection, with no error shown. `flow-launch-chrome.sh` launches a separate automation-only profile instead (`./chrome-profile/`, gitignored — it holds real session cookies, never commit it). You log in once; it's remembered after that.
+Chrome restricts `--remote-debugging-port` on your everyday default profile. That restriction defends against a *different* scenario than what this toolkit does: a remote attacker or malicious script silently attaching DevTools to a session you're already using, without your knowledge, to steal live cookies. It is not a restriction on the account owner running their own local automation against their own browser with full knowledge and consent — that's precisely what `--remote-debugging-port` plus a dedicated profile exist to support, and it's the same mechanism every browser test-automation framework (Playwright, Puppeteer, Selenium) relies on industry-wide.
+
+`flow-launch-chrome.sh` launches a separate, dedicated profile (`./chrome-profile/`, gitignored — it holds real session cookies, never commit it) instead of your everyday one, for two reasons: it's the profile Chrome will actually open the debug port on, and it keeps this automation scoped to one Flow-only login rather than your main browsing session. You log into Google in that profile yourself, once; it's remembered after that.
 
 ## Usage
 

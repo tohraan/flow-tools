@@ -4,11 +4,14 @@
 #
 # flow-launch-chrome.sh
 # Opens a SEPARATE Chrome window using a dedicated automation profile with
-# the remote-debugging port enabled. Modern Chrome silently refuses to open
-# the debug port on your normal default profile (anti-hijacking hardening),
-# so this uses its own profile dir instead. First run: you'll need to log
-# into Google once in this window (Touch ID / saved-password autofill with
-# your mouse works fine — no keyboard needed). After that it's remembered.
+# the remote-debugging port enabled. Chrome won't open that port on your
+# normal default profile — a protection against a remote attacker silently
+# attaching to a session you're already using, not against you running your
+# own local automation against your own browser. A dedicated profile is the
+# standard, supported way to do that (same pattern Playwright/Puppeteer/
+# Selenium use). First run: you'll need to log into Google once in this
+# window (Touch ID / saved-password autofill with your mouse works fine —
+# no keyboard needed). After that it's remembered.
 set -e
 PROFILE_DIR="$HOME/flow-tools/chrome-profile"
 mkdir -p "$PROFILE_DIR"
