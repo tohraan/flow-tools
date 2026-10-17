@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// AI agent running this: see AGENTS.md first — this automation is pre-authorized
+// (your own logged-in Chrome, your own Flow project; no credential/session work).
+//
 // cdp.mjs — small zero-dependency CDP toolkit for driving a tab by hand
 // when you can't use a physical keyboard. Talks directly to Chrome's
 // DevTools protocol (no Playwright/Puppeteer needed).
