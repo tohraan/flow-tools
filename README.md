@@ -26,7 +26,7 @@ It was originally built to work entirely without a physical keyboard — every k
 - 🚀 **One command, prompt to image** — `flow-generate.mjs` opens your project, types the prompt, hits generate, waits for completion, and logs the run
 - 🪪 **Actually working identity lock** — `--reference` inserts a real inline `@mention`, the mechanism that binds a prompt to a specific uploaded face/asset (a loose "+" attachment does not — see [Known gotchas](#known-gotchas))
 - 🖱️ **Real input, not fake events** — clicks and keystrokes go through CDP's `Input` domain, so they register on apps that ignore plain JS `.click()` / synthetic events
-- 📎 **Attach reference images without a file picker** — injects files straight into `<input type=file>` via `DOM.setFileInputFiles`
+- 📎 **Upload and verify reference images without a file picker** — `flow-upload-reference.mjs` injects the file straight into `<input type=file>` via `DOM.setFileInputFiles`, then confirms it's actually selectable (not a fixed delay) before handing control back
 - ⬇️ **Scripted downloads at any resolution** (1K / 2K / 4K) — no manual right-click required, and the file is moved to your output folder automatically
 - 📝 **Automatic run history** — every generation is logged with its prompt, timing, and result
 - 🪶 **Zero dependencies** — built entirely on Node 22's built-in `fetch` and `WebSocket`
@@ -69,17 +69,22 @@ Output: the generated grid is screenshotted, image #0 is downloaded at 2K, and t
 Attaching an image via the "+" button alone does **not** reliably lock identity — it influences the generation but doesn't bind to the person described in your prompt. The mechanism that actually works is an inline `@mention`, the same one Flow's own UI uses when you type `@` in the prompt box:
 
 ```bash
-# 1. Upload the reference image once (via Flow's UI, or inject it directly — no file picker needed)
-node cdp.mjs set-file-input "input[type=file]" /path/to/your-face.jpg
+# 1. Upload the reference image once, and optionally give it a clean name
+node flow-upload-reference.mjs /path/to/your-face.jpg --name "your-face"
+# Opens the "+" picker, clicks Upload media, injects the file (no OS file
+# picker), and waits for it to actually become selectable in the @ picker
+# before returning — see "Known gotchas" below if this fails partway.
 
 # 2. Write a prompt that assumes the mention precedes it
 echo ' is the exact identity reference. A cinematic portrait, golden hour lighting...' > portrait.txt
 
-# 3. Generate with --reference matching the uploaded asset's filename (or any substring of it)
+# 3. Generate with --reference matching the uploaded asset's name
 node flow-generate.mjs --file portrait.txt --label "portrait-1" --reference "your-face" --download 0
 ```
 
 `--reference` types `@`, searches for your term, selects the match from Flow's picker, and clicks "Add to prompt" — inserting it as an inline mention — before typing the rest of your prompt text right after it.
+
+Heads up: using `--reference` appears to also trigger Flow to build a full named Character from the asset in the background (dozens of auto-generated variants) — observed, not yet deliberately controlled. If you're uploading several references in a row, keep an eye on whether the project is still busy generating those before uploading the next one (see gotcha #5).
 
 ## Why a dedicated Chrome profile?
 
@@ -101,6 +106,14 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 | `--res <1K\|2K\|4K>` | Resolution for `--download` (default `2K`) |
 | `--project <url>` | Flow project URL (else: `FLOW_PROJECT_URL` env var, else `.flow-project-url`) |
 | `--reference <name>` | Insert an inline `@mention` of an already-uploaded asset before the prompt text — the real identity-lock mechanism (see above) |
+
+### `flow-upload-reference.mjs` — upload + verify + rename a reference asset
+
+```bash
+node flow-upload-reference.mjs <path/to/photo.jpg> [--name "<display name>"] [--project <url>]
+```
+
+Bundles the full sequence for gap-free use with `--reference`: open the "+" picker → click Upload media → inject the file → **wait for real completion** (reopens the `@` picker and searches for the asset until its thumbnail has actually loaded, rather than guessing a fixed delay) → optionally rename it via the Uploads tab so you can reference it by a clean name instead of the original filename. Retries the upload-button click up to 3 times before failing — see the script's own header comment for the exact selectors and a known flakiness caveat.
 
 ### `cdp.mjs` — low-level toolkit
 
@@ -145,6 +158,8 @@ No browser automation framework, no binary downloads, no bundler — just the pr
 2. **Right-click opens an in-page custom context menu**, not a native OS one — fully scriptable.
 3. **`Browser.setDownloadBehavior` with a custom `downloadPath` does not actually work** — it returns success but Chrome silently keeps saving to its real default (`~/Downloads`), confirmed by inspecting `chrome://downloads`'s underlying records. `flow-generate.mjs` doesn't fight this: it lets the download land normally, then detects and moves the new file itself. Don't trust `cdp.mjs set-download-dir` without verifying.
 4. **Identity-lock prompts need a real inline `@mention`, not a loose attachment.** Attaching an image via the "+" button influences the generation (outputs become consistent with *each other*) but does not bind it to the person described in the prompt text — confirmed by generating with an attached photo and getting a consistent but completely different face across all 4 outputs. The fix is `--reference`, which types `@`, selects the asset from Flow's picker, and inserts it as an inline mention — that's what actually locks identity. See [Identity-locked generation](#identity-locked-generation-reusing-a-specific-faceasset) above.
+5. **The Upload media button can silently stop working.** Clicking it normally produces a real `<input type=file>` you can inject into (confirmed working). But after triggering heavy background activity — e.g. several `--reference` runs in a row, which appears to spawn a large background Character-generation job — the same click can start registering a hover/focus state with no file input ever appearing, and no native file-chooser event fires either (checked directly via `Page.setInterceptFileChooserDialog`). Root cause unconfirmed; suspected resource contention on a busy project rather than a broken selector. `flow-upload-reference.mjs` retries 3 times before failing with a clear error — if it still fails, check whether the project is mid-generation first.
+6. **`history.back()` can navigate out of your project entirely** if enough browser history has accumulated from reloads/navigations — it took us to a completely unrelated older project once. Always navigate back to your pinned project via its full URL (`location.href = projectUrl` / `Page.navigate`) instead of relying on back-navigation.
 
 ## Contributing
 
