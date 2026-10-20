@@ -166,6 +166,59 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function pressEscape(send) {
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
+}
+
+// Types "@name" into the prompt box and picks the asset with Flow's "Add to
+// prompt" button. The picker searches as you type and can take several
+// seconds on a busy project — a fixed 0.6s wait used to fail every request
+// with "not found" — so this polls for up to 8s and tries three times. If
+// the asset never appears it saves a screenshot of what Flow actually showed.
+async function insertReference(send, name, boxPos, label) {
+  const findAdd = `(() => {
+    const b = Array.from(document.querySelectorAll('button')).find(e => (e.textContent||'').trim()==='Add to prompt' && e.getBoundingClientRect().width > 0);
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return { x: r.x + r.width/2, y: r.y + r.height/2 };
+  })()`;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      // Start the mention again from an empty prompt box.
+      await pressEscape(send);
+      await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`);
+      await sleep(400);
+      await clickAt(send, boxPos.x, boxPos.y);
+      await sleep(200);
+    }
+    await send('Input.insertText', { text: '@' });
+    await sleep(500);
+    await send('Input.insertText', { text: name });
+    for (const deadline = Date.now() + 8000; Date.now() < deadline; ) {
+      await sleep(400);
+      const addPos = await evalJson(send, findAdd);
+      if (!addPos) continue;
+      await clickAt(send, addPos.x, addPos.y);
+      await sleep(400);
+      return;
+    }
+    console.error(`[${label}] reference "${name}" didn't appear in the @ picker (attempt ${attempt}/3)`);
+  }
+
+  const shot = path.join(DOWNLOADS_DIR, `reference-missing-${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
+  try {
+    await mkdir(DOWNLOADS_DIR, { recursive: true });
+    const { data } = await send('Page.captureScreenshot', { format: 'png' });
+    await writeFile(shot, Buffer.from(data, 'base64'));
+  } catch {}
+  const onScreen = await evalJson(send, `Array.from(document.querySelectorAll('button')).filter(b => b.getBoundingClientRect().width > 0).map(b => (b.textContent || b.getAttribute('aria-label') || '').trim()).filter(t => t && t.length < 40).slice(0, 20)`).catch(() => []);
+  // Leave the prompt box clean for the next request.
+  await pressEscape(send);
+  await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`).catch(() => {});
+  throw new Error(`Reference asset "${name}" not found in the @mention picker after 3 tries (8s each). Check an asset named "${name}" still exists in this Flow project. Screenshot: ${shot}. Buttons on screen: ${onScreen.join(' | ') || 'none'}`);
+}
+
 async function main() {
   const t0 = Date.now();
   const flags = parseFlags(process.argv.slice(2));
@@ -207,21 +260,7 @@ async function main() {
 
     // 3. If a reference asset was requested, insert it as an inline @mention FIRST —
     // this is what actually binds identity (a loose "+" ingredient attachment does not).
-    if (flags.reference) {
-      await send('Input.insertText', { text: '@' });
-      await sleep(400);
-      await send('Input.insertText', { text: flags.reference });
-      await sleep(600);
-      const addPos = await evalJson(send, `(() => {
-        const b = Array.from(document.querySelectorAll('button')).find(e => (e.textContent||'').trim()==='Add to prompt');
-        if (!b) return null;
-        const r = b.getBoundingClientRect();
-        return { x: r.x + r.width/2, y: r.y + r.height/2 };
-      })()`);
-      if (!addPos) throw new Error(`Reference asset "${flags.reference}" not found in the @mention picker`);
-      await clickAt(send, addPos.x, addPos.y);
-      await sleep(400);
-    }
+    if (flags.reference) await insertReference(send, flags.reference, boxPos, label);
 
     // 4. Type the prompt (continues right after the mention chip, if any)
     await send('Input.insertText', { text });
