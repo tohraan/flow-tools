@@ -277,7 +277,15 @@ async function main() {
         qaNote = formatQaLine(result);
         flags.download = result.best;
       } catch (err) {
-        throw new Error(`Image QA unavailable: ${err.message.split('\n')[0].slice(0, 300)}`);
+        // A failed `claude -p ...` call's real reason is in stderr (Node
+        // attaches it to the rejected error for promisified execFile) —
+        // the first line of err.message is just the echoed command-line,
+        // which for this call is the QA instruction text itself, so
+        // `.split('\n')[0]` was silently discarding the actual cause
+        // (signed out vs. rate-limited vs. anything else) and showing
+        // the operator a useless truncated prompt dump instead.
+        const reason = (err.stderr && String(err.stderr).trim()) || String(err.message || err).replace(/\s+/g, ' ');
+        throw new Error(`Image QA unavailable: ${reason.slice(0, 300)}`);
       }
       console.log(`[${label}] ${qaNote}`);
     }
