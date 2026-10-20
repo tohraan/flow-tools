@@ -111,6 +111,15 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 | `--project <url>` | Flow project URL (else: `FLOW_PROJECT_URL` env var, else `.flow-project-url`) |
 | `--reference <name>` | Insert an inline `@mention` of an already-uploaded asset before the prompt text — the real identity-lock mechanism (see above) |
 
+### `flow-qa.mjs` — pick the best of the 4 outputs automatically
+
+`flow-generate.mjs --qa` (used by `flow-daemon.mjs`) first checks that the Claude CLI is signed in. It scores four candidates against either the text-surface brief or the new text-free photo-overlay brief (realism, subject, absence of embedded text, clean overlay space, and scene relevance). A score below 8/10 or zero on a required check fails. The daemon reruns a failing grid up to three times. If QA is signed out or still fails, the queue request fails visibly; it never accepts the first or a failing image. Exact founder likeness still requires owner approval in the portal.
+
+Standalone, on images you already have:
+```bash
+node flow-qa.mjs --prompt prompt.txt img0.png img1.png img2.png img3.png
+```
+
 ### `flow-upload-reference.mjs` — upload + verify + rename a reference asset
 
 ```bash

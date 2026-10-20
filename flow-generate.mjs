@@ -7,9 +7,14 @@
 // The only real wait is Flow's own generation time.
 //
 // Usage:
-//   node flow-generate.mjs --file prompt.txt --label "dubai-walk-3" [--download N] [--res 2K] [--project <url>] [--reference "<asset name>"]
+//   node flow-generate.mjs --file prompt.txt --label "dubai-walk-3" [--download N | --qa] [--res 2K] [--project <url>] [--reference "<asset name>"]
 //
 // --download N     after generation, download the Nth image (0-indexed, left to right) at --res (default 2K)
+// --qa             instead of a fixed index: crop the 4 new images, score them with flow-qa.mjs
+//                  (surface in frame, founder gaze, text, looks installed, thumbnail read) and
+//                  download the best one. Prints "QA: PASS|FAIL best=#N score=X/10 — ...".
+//                  On FAIL it downloads the best-scoring image for a caller to review or retry.
+//                  If QA itself cannot run, generation fails closed without a download.
 // --project URL    the Flow project to open (e.g. https://flow.google.com/project/<id>).
 //                  Resolved in order: --project flag > FLOW_PROJECT_URL env var >
 //                  ./.flow-project-url (gitignored, one line, for your own default) > error.
@@ -30,6 +35,8 @@ import { readFile, writeFile, appendFile, readdir, rename, stat } from 'node:fs/
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
+import { assertQaAvailable, runQa, formatQaLine } from './flow-qa.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -67,6 +74,7 @@ function parseFlags(argv) {
     else if (argv[i] === '--download') out.download = Number(argv[++i]);
     else if (argv[i] === '--res') out.res = argv[++i];
     else if (argv[i] === '--reference') out.reference = argv[++i];
+    else if (argv[i] === '--qa') out.qa = true;
     else if (!out.text) out.text = argv[i];
   }
   return out;
@@ -159,6 +167,7 @@ async function main() {
   }
   const label = flags.label || (flags.file ? path.basename(flags.file, path.extname(flags.file)) : 'untitled');
   const projectUrl = await resolveProjectUrl(flags.project);
+  if (flags.qa) await assertQaAvailable();
 
   const { ws, send } = await connect(PORT, MATCH);
 
@@ -241,6 +250,38 @@ async function main() {
     const shotPath = path.join(DOWNLOADS_DIR, shotName);
     await writeFile(shotPath, Buffer.from(data, 'base64'));
 
+    // 7b. Optional QA: crop the newest 4 grid images (same ordering the download
+    // step uses) and let flow-qa.mjs pick which index to download.
+    let qaNote = '';
+    if (flags.qa) {
+      try {
+        const rects = await evalJson(send, `(() => {
+          const imgs = Array.from(document.querySelectorAll('img')).map(el => el.getBoundingClientRect()).filter(r => r.width > 50);
+          imgs.sort((a,b) => a.y - b.y || a.x - b.x);
+          return imgs.slice(0, 4).map(r => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
+        })()`);
+        if (!rects || rects.length === 0) throw new Error('no grid images found to crop');
+        const qaDir = path.join(DOWNLOADS_DIR, 'qa', shotName.replace(/\.png$/, ''));
+        await mkdir(qaDir, { recursive: true });
+        const crops = [];
+        for (let i = 0; i < rects.length; i++) {
+          const { data: crop } = await send('Page.captureScreenshot', {
+            format: 'png', captureBeyondViewport: true, clip: { ...rects[i], scale: 2 },
+          });
+          const cropPath = path.join(qaDir, `${i}.png`);
+          await writeFile(cropPath, Buffer.from(crop, 'base64'));
+          crops.push(cropPath);
+        }
+        console.log(`[${label}] QA: scoring ${crops.length} images...`);
+        const result = await runQa({ imagePaths: crops, promptText: text });
+        qaNote = formatQaLine(result);
+        flags.download = result.best;
+      } catch (err) {
+        throw new Error(`Image QA unavailable: ${err.message.split('\n')[0].slice(0, 300)}`);
+      }
+      console.log(`[${label}] ${qaNote}`);
+    }
+
     // 8. Optional: download the Nth image at the requested resolution.
     // Flow prepends the newest generation to the top of the grid, so the
     // newest batch is always the first N images in (y, then x) order.
@@ -296,7 +337,7 @@ async function main() {
     // 9. Append to build log + decisions log
     const now = new Date().toISOString();
     const excerpt = text.trim().split('\n').slice(0, 3).join(' ').slice(0, 200);
-    await appendFile(BUILD_LOG, `\n## ${now} — ${label}\n- Elapsed: ${elapsed}s\n- Screenshot: downloads/${shotName}\n- Prompt file: ${flags.file || '(inline)'}\n- Excerpt: ${excerpt}...\n${downloadedNote ? `- ${downloadedNote}\n` : ''}`);
+    await appendFile(BUILD_LOG, `\n## ${now} — ${label}\n- Elapsed: ${elapsed}s\n- Screenshot: downloads/${shotName}\n- Prompt file: ${flags.file || '(inline)'}\n- Excerpt: ${excerpt}...\n${qaNote ? `- ${qaNote}\n` : ''}${downloadedNote ? `- ${downloadedNote}\n` : ''}`);
     await appendFile(DECISIONS_LOG, `\n## ${label} (${now.slice(0, 10)})\n- **Essence:** ${excerpt}...\n- **Result:** (fill in after review) — 4 images generated, screenshot at downloads/${shotName}\n- **Keep for next time:** (note what worked / what to change)\n`);
 
     console.log(`[${label}] Logged. Screenshot: ${shotPath}`);

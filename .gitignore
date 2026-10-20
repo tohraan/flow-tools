@@ -5,6 +5,10 @@ chrome-profile/
 # --project, FLOW_PROJECT_URL, or their own .flow-project-url.
 .flow-project-url
 
+# flow-daemon.mjs's app URL + shared secret, written by install-daemon.command.
+# Never commit — this is your daemon's live auth credential for your app.
+.flow-daemon-env
+
 # Scratch screenshots from debugging
 *.png
 !docs/**/*.png
