@@ -15,7 +15,10 @@
 // build carousels from one consistent photo series.
 //
 // Scoring is done by a headless `claude -p` call that reads the image files, so
-// no API key is needed — it runs on the operator's own Claude Code login.
+// no API key is needed — it runs on the operator's own Claude Code login. The
+// call runs with the operator's own hooks, plugins, MCP servers and CLAUDE.md
+// switched off (see isolationFlags), and when it fails the error says what
+// the CLI actually reported (see QaUnavailableError).
 //
 // Used two ways:
 //   1. By flow-generate.mjs --qa, flow-harvest.mjs and flow-daemon.mjs (imports).
@@ -58,16 +61,141 @@ async function claudeBin() {
   try { await access(local); return local; } catch { return 'claude'; }
 }
 
-export async function assertQaAvailable() {
+// QA couldn't run (as opposed to an image failing QA). `kind` tells callers
+// whether waiting helps: 'transient' (timeout, overload) and 'limit' (usage
+// limit; retryAt when the CLI says when it resets) are worth retrying;
+// 'auth' and 'setup' need the operator.
+export class QaUnavailableError extends Error {
+  constructor(reason, kind, retryAt = null) {
+    super(reason);
+    this.name = 'QaUnavailableError';
+    this.kind = kind;
+    this.retryAt = retryAt;
+  }
+}
+
+// Printed whenever stdin is a pipe with nothing in it. Harmless, and it used
+// to be the only thing in stderr, hiding the real failure.
+const STDIN_NOTICE = /^Warning: no stdin data received.*$/gm;
+
+// What a failed `claude -p --output-format json` call actually said. API
+// errors (usage limit, auth, overload, bad model) come back as JSON on stdout
+// with is_error set, not on stderr.
+export function describeClaudeFailure(err, { timeoutMs = 0, bin = 'claude' } = {}) {
+  if (err.code === 'ENOENT') return `Claude CLI not found at ${bin}. Set FLOW_QA_CLAUDE to its path.`;
+  if (err.killed || err.signal) return `QA call timed out after ${Math.round(timeoutMs / 1000)}s`;
+  let json = null;
+  try { json = JSON.parse(String(err.stdout || '')); } catch {}
+  const said = json && (json.result || json.terminal_reason || json.subtype);
+  if (said) return `${String(said).trim()}${json.api_error_status ? ` (HTTP ${json.api_error_status})` : ''}`;
+  const stderr = String(err.stderr || '').replace(STDIN_NOTICE, '').trim();
+  return stderr || `claude exited with code ${err.code ?? 'unknown'} and no message`;
+}
+
+export function classifyQaFailure(reason) {
+  if (/not found at|unknown option|unrecognized|not a valid model|issue with the selected model/i.test(reason)) return 'setup';
+  if (/log ?in|logged out|signed out|not authenticated|api key|unauthori[sz]ed|oauth|credential|HTTP 40[13]/i.test(reason)) return 'auth';
+  if (/usage limit|hit your limit|limit reached|quota|rate.?limit|HTTP 429/i.test(reason)) return 'limit';
+  return 'transient';
+}
+
+function qaUnavailable(reason) {
+  const kind = classifyQaFailure(reason);
+  // Older CLIs report a usage limit as "Claude AI usage limit reached|<epoch seconds>".
+  const epoch = kind === 'limit' ? reason.match(/\|(\d{10})\b/) : null;
+  return new QaUnavailableError(reason.replace(/\|\d{10}\b/, '').slice(0, 400), kind, epoch ? new Date(Number(epoch[1]) * 1000) : null);
+}
+
+// Runs `claude` with stdin closed (so it doesn't wait 3s for piped input) and
+// turns any failure into a QaUnavailableError carrying the CLI's own reason.
+async function runClaude(args, { cwd, timeoutMs }) {
+  const bin = await claudeBin();
+  const call = execFileAsync(bin, args, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+  call.child.stdin?.end();
   let stdout;
   try {
-    ({ stdout } = await execFileAsync(await claudeBin(), ['auth', 'status'], { timeout: 10000 }));
-  } catch {
-    throw new Error('Image QA is unavailable: Claude CLI is signed out or cannot report its auth status');
+    ({ stdout } = await call);
+  } catch (err) {
+    throw qaUnavailable(describeClaudeFailure(err, { timeoutMs, bin }));
+  }
+  let json = null;
+  try { json = JSON.parse(stdout); } catch {}
+  if (json?.is_error) throw qaUnavailable(describeClaudeFailure({ stdout }, { timeoutMs, bin }));
+  // --output-format json wraps the reply as {"result": "..."}, plus
+  // {"structured_output": {...}} when --json-schema was passed.
+  return json?.structured_output ?? json?.result ?? stdout;
+}
+
+// Flags that keep the QA call independent of the operator's own Claude Code
+// setup: a user-level hook (e.g. a Stop hook that insists on a log entry), a
+// plugin, an MCP server or a global CLAUDE.md can make a headless call fail,
+// hang or answer in prose. Only flags this CLI version lists in --help are
+// passed, so an older install doesn't fail on an unknown option.
+let cliHelp;
+async function cliSupports(flag) {
+  if (cliHelp === undefined) {
+    cliHelp = '';
+    try {
+      const call = execFileAsync(await claudeBin(), ['--help'], { timeout: 15000 });
+      call.child.stdin?.end();
+      ({ stdout: cliHelp } = await call);
+    } catch {}
+  }
+  return cliHelp.includes(flag);
+}
+
+async function isolationFlags() {
+  return [
+    ...((await cliSupports('--safe-mode')) ? ['--safe-mode'] : (await cliSupports('--setting-sources')) ? ['--setting-sources='] : []),
+    ...((await cliSupports('--strict-mcp-config')) ? ['--strict-mcp-config'] : []),
+    ...((await cliSupports('--no-session-persistence')) ? ['--no-session-persistence'] : []),
+  ];
+}
+
+// The reply's shape, enforced by the CLI (--json-schema) where it supports
+// it. Free-text JSON from the model drops a closing quote now and then,
+// which used to surface as "QA unavailable".
+function replySchema(rubric) {
+  const score = { type: 'integer', minimum: 0, maximum: 2 };
+  const checks = RUBRICS[rubric].checks;
+  return {
+    type: 'object',
+    required: ['images'],
+    properties: {
+      images: {
+        type: 'array',
+        minItems: 1,
+        items: {
+          type: 'object',
+          required: ['index', ...checks, 'setting', 'description', 'person', 'note'],
+          properties: {
+            index: { type: 'integer', minimum: 0 },
+            ...Object.fromEntries(checks.map((c) => [c, score])),
+            setting: { type: 'string', enum: SETTINGS },
+            description: { type: 'string' },
+            person: { type: 'boolean' },
+            note: { type: 'string' },
+          },
+        },
+      },
+    },
+  };
+}
+
+export async function assertQaAvailable() {
+  let stdout;
+  const bin = await claudeBin();
+  try {
+    const call = execFileAsync(bin, ['auth', 'status'], { timeout: 10000 });
+    call.child.stdin?.end();
+    ({ stdout } = await call);
+  } catch (err) {
+    const reason = describeClaudeFailure(err, { timeoutMs: 10000, bin });
+    throw new QaUnavailableError(`Image QA is unavailable: ${reason}`, err.code === 'ENOENT' ? 'setup' : 'auth');
   }
   let status;
-  try { status = JSON.parse(stdout); } catch { throw new Error('Image QA returned an unreadable auth status'); }
-  if (!status.loggedIn) throw new Error('Image QA is signed out. Run claude login before generating images.');
+  try { status = JSON.parse(stdout); } catch { throw new QaUnavailableError('Image QA returned an unreadable auth status', 'setup'); }
+  if (!status.loggedIn) throw new QaUnavailableError('Image QA is signed out. Run claude login before generating images.', 'auth');
 }
 
 // Pulls {TEXT} out of the MASTER's TEXT block, and the one /command line
@@ -151,11 +279,23 @@ function buildInstruction(rubric, parsed, imagePaths) {
   ].filter((l) => l !== '').join('\n');
 }
 
-function extractJson(raw) {
+// For CLIs without --json-schema. When the JSON is broken, the usual cause is
+// one string missing its closing quote before a brace, so that repair is
+// tried at each closing brace before giving up.
+export function extractJson(raw) {
+  if (raw && typeof raw === 'object') return raw;
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   if (start < 0 || end < start) throw new Error(`QA reply had no JSON: ${raw.slice(0, 300)}`);
-  return JSON.parse(raw.slice(start, end + 1));
+  const text = raw.slice(start, end + 1);
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    for (let i = text.lastIndexOf('}'), tries = 0; i > 0 && tries < 40; i = text.lastIndexOf('}', i - 1), tries++) {
+      try { return JSON.parse(`${text.slice(0, i)}"${text.slice(i)}`); } catch {}
+    }
+    throw err;
+  }
 }
 
 // Pass/best are computed here from the raw scores rather than trusted from
@@ -186,16 +326,17 @@ export async function runQa({ imagePaths, promptText, rubric = 'auto', timeoutMs
     '--output-format', 'json',
     '--model', process.env.FLOW_QA_MODEL || 'sonnet',
     '--allowedTools', 'Read',
+    ...((await cliSupports('--json-schema')) ? ['--json-schema', JSON.stringify(replySchema(resolved))] : []),
+    ...(await isolationFlags()),
     ...dirs.flatMap((d) => ['--add-dir', d]),
   ];
-  const { stdout } = await execFileAsync(await claudeBin(), args, {
-    cwd: dirs[0], timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024,
-  });
-  // --output-format json wraps the reply as {"result": "..."}.
-  let reply = stdout;
-  try { reply = JSON.parse(stdout).result ?? stdout; } catch {}
-  const { images } = extractJson(reply);
-  if (!Array.isArray(images) || images.length === 0) throw new Error('QA reply had no images array');
+  const reply = await runClaude(args, { cwd: dirs[0], timeoutMs });
+  let images;
+  try { ({ images } = extractJson(reply)); } catch { images = null; }
+  if (!Array.isArray(images) || images.length === 0) {
+    const said = typeof reply === 'string' ? reply : JSON.stringify(reply);
+    throw new QaUnavailableError(`QA answered without scores: ${said.replace(/\s+/g, ' ').slice(0, 200)}`, 'transient');
+  }
   return { ...decide(images, resolved), rubric: resolved };
 }
 

@@ -24,7 +24,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runQa, verdictFor } from './flow-qa.mjs';
+import { assertQaAvailable, runQa, verdictFor } from './flow-qa.mjs';
 import {
   FLOW_DIR, FLOW_MATCH, acquireHarvestLock, clickAt, connectTab, downloadAt, evalJson, hashFile,
   loadPortalEnv, nearAny, openHelperTab, portal, releaseHarvestLock, sleep,
@@ -103,15 +103,26 @@ async function scrollGrid(send) {
   return sig(before) !== sig(after);
 }
 
+// QA that couldn't run: a timeout or overload is retried with backoff (giving
+// up after QA_GIVE_UP_MS), a usage limit waits for its reset, and a sign-in
+// or setup problem stops the harvest straight away with the CLI's own reason.
 async function qaWithPatience(imagePaths) {
   const started = Date.now();
   for (let wait = 60_000; ; wait = Math.min(wait * 2, 10 * 60_000)) {
     try {
       return await runQa({ imagePaths, promptText: '', rubric: 'library' });
     } catch (err) {
-      const reason = (err.stderr && String(err.stderr).trim()) || String(err.message || err).replace(/\s+/g, ' ');
+      const reason = String(err.message || err).replace(/\s+/g, ' ');
+      const kind = err.kind ?? 'transient';
+      if (kind === 'auth' || kind === 'setup') throw new Error(`Image QA can't run: ${reason}`);
+      if (kind === 'limit') {
+        const until = err.retryAt && err.retryAt > Date.now() ? err.retryAt : new Date(Date.now() + 15 * 60_000);
+        console.log(`  Claude usage limit (${reason.slice(0, 160)}) — waiting until ${until.toLocaleTimeString()}, then carrying on`);
+        await sleep(until - Date.now() + 30_000);
+        continue;
+      }
       if (Date.now() - started + wait > QA_GIVE_UP_MS) throw new Error(`Image QA unavailable: ${reason.slice(0, 300)}`);
-      console.log(`  QA unavailable (${reason.slice(0, 160)}) — retrying in ${Math.round(wait / 60_000)} min`);
+      console.log(`  QA couldn't run (${reason.slice(0, 200)}) — retrying in ${Math.round(wait / 60_000)} min`);
       await sleep(wait);
     }
   }
@@ -121,6 +132,7 @@ async function main() {
   const flags = parseFlags(process.argv.slice(2));
   const api = portal(await loadPortalEnv(__dirname));
   const url = await projectUrl(flags.project);
+  await assertQaAvailable();
   await acquireHarvestLock();
   const cleanup = async () => { await releaseHarvestLock(); };
   process.on('SIGINT', async () => { console.log('\nStopping — what was added so far stays in the library.'); await cleanup(); process.exit(130); });

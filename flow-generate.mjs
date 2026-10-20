@@ -295,12 +295,9 @@ async function main() {
         console.log(`[${label}] ${qaNote}`);
         console.log(`QA_JSON: ${JSON.stringify({ status: result.pass ? 'pass' : 'fail', best: result.best, verdict: verdictFor(result), thumbKey: tiles[result.best]?.src || null, cropPath: crops[result.best] || null })}`);
       } catch (err) {
-        // A failed `claude -p ...` call's real reason is in stderr (Node
-        // attaches it to the rejected error for promisified execFile) —
-        // the first line of err.message is just the echoed command-line,
-        // which for this call is the QA instruction text itself, so it
-        // can't stand in for the actual cause.
-        const reason = (err.stderr && String(err.stderr).trim()) || String(err.message || err).replace(/\s+/g, ' ');
+        // runQa throws a QaUnavailableError whose message is what the
+        // Claude CLI itself reported (usage limit, sign-in, timeout...).
+        const reason = String(err.message || err).replace(/\s+/g, ' ');
         // QA couldn't run (CLI signed out, rate-limited, etc.). Still save a
         // candidate so the generation isn't lost, marked UNAVAILABLE, never
         // PASS: the portal holds it until QA can run on the stored file.

@@ -119,7 +119,9 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 
 Scores images with a headless `claude -p` call (your own Claude Code login, no API key) on one of three rubrics: **surface** (a format-hijack single-post image with on-image text), **photo** (a text-free carousel base generated against a brief: realism, subject, no lettering, clear overlay space, scene relevance) and **library** (the same, without a brief — for images already in the project). A score below 8/10 or a zero on a required check fails. Every verdict also carries a coarse `setting` from a fixed list, a short description, and a note on why it fell short. Exact founder likeness still requires owner approval in the portal.
 
-Standalone, on images you already have:
+The call runs with your own Claude Code hooks, plugins, MCP servers and global `CLAUDE.md` switched off (`--safe-mode`, or `--setting-sources=` on older CLIs), so a personal setup such as a Stop hook can't break it. When QA can't run, the error is what the CLI itself reported (usage limit, signed out, timeout, bad model), not its stdin notice.
+
+Standalone, on images you already have (also the quickest way to see why QA isn't running):
 ```bash
 node flow-qa.mjs [--prompt prompt.txt] [--rubric photo|surface|library] img0.png img1.png img2.png img3.png
 ```
@@ -140,7 +142,7 @@ It pauses generation while a harvest runs, and keeps checking in so waiting post
 node flow-harvest.mjs [--limit N] [--res 2K] [--project <url>]   # or double-click harvest.command
 ```
 
-Walks the project grid top to bottom. For every image tile it skips what the portal's library already has (same Flow image URL, or the same picture by hash) and anything already posted on LinkedIn, QAs the rest four at a time with the `library` rubric, downloads the 2K original of each pass into the library, and records each failure with its QA preview and the reason. Carousels then take their base images from the library before asking Flow for new ones. Resumable — run it again any time.
+Walks the project grid top to bottom. For every image tile it skips what the portal's library already has (same Flow image URL, or the same picture by hash) and anything already posted on LinkedIn, QAs the rest four at a time with the `library` rubric, downloads the 2K original of each pass into the library, and records each failure with its QA preview and the reason. Carousels then take their base images from the library before asking Flow for new ones. Resumable — run it again any time. If QA can't run it says why: a timeout or overload is retried for up to 15 minutes, a Claude usage limit waits for its reset and carries on, and a sign-in problem stops the run straight away.
 
 ### `flow-upload-reference.mjs` — upload + verify + rename a reference asset
 
