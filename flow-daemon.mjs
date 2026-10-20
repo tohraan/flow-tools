@@ -147,7 +147,17 @@ async function fulfillOne(req) {
       const detail = [err.stdout, err.stderr].filter(Boolean).join('\n').slice(0, 1500);
       throw new Error(`flow-generate.mjs failed: ${err.message}${detail ? `\n---\n${detail}` : ''}`);
     }
-    const qaLine = (stdout.match(/QA: .+/) || [''])[0];
+    // flow-generate.mjs always prints a "QA: scoring N images..." progress
+    // line before the real outcome line ("QA: PASS/FAIL/UNAVAILABLE ...").
+    // A bare /QA: .+/ with no /g matches the FIRST "QA: " occurrence in
+    // stdout, which is always the progress line, never the outcome — this
+    // had been silently wrong since the QA mechanism was built, just never
+    // exercised: QA-unavailable used to throw before ever printing the
+    // outcome line (so this regex was never reached on that path), and a
+    // genuine PASS/FAIL run was never observed this session to catch it
+    // the other way. Matching the specific outcome keywords instead of
+    // "any QA: line" fixes it regardless of line order.
+    const qaLine = (stdout.match(/QA: (?:PASS|FAIL|UNAVAILABLE)\b.*/) || [''])[0];
     if (qaLine) await log(`[${req.id}] ${qaLine}`);
     if (qaLine.startsWith('QA: PASS')) break;
     if (qaLine.startsWith('QA: UNAVAILABLE')) { qaUnverified = true; break; }
