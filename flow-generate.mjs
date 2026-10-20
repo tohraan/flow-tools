@@ -320,6 +320,15 @@ async function main() {
         const r = imgs[${n}];
         return r ? { x: r.x + r.width/2, y: r.y + r.height/2 } : null;
       })()`);
+      // Flow's URL for the downloaded tile, so the portal's library can tell a
+      // later harvest that this image is already in it.
+      const tileSrc = await evalJson(send, `(() => {
+        const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50);
+        imgs.sort((a,b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y || a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+        const el = imgs[${n}];
+        return el ? (el.currentSrc || el.src || '') : '';
+      })()`).catch(() => '');
+      if (/^https?:/.test(tileSrc || '')) console.log(`TILE_SRC: ${tileSrc.slice(0, 500)}`);
       if (pos) {
         await clickAt(send, pos.x, pos.y, 'right');
         await sleep(600);

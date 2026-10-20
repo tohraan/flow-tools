@@ -115,34 +115,26 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 | `--qa-file <path>` | Prompt text QA judges against, when the typed prompt differs (e.g. retry notes appended) |
 | `--skip-download-on-fail` | With `--qa`: download nothing when no candidate passes |
 
-### `flow-qa.mjs` — pick the best of the 4 outputs automatically
-
-Scores images with a headless `claude -p` call (your own Claude Code login, no API key) on one of three rubrics: **surface** (a format-hijack single-post image with on-image text), **photo** (a text-free carousel base generated against a brief: realism, subject, no lettering, clear overlay space, scene relevance) and **library** (the same, without a brief — for images already in the project). A score below 8/10 or a zero on a required check fails. Every verdict also carries a coarse `setting` from a fixed list, a short description, and a note on why it fell short. Exact founder likeness still requires owner approval in the portal.
-
-The call runs with your own Claude Code hooks, plugins, MCP servers and global `CLAUDE.md` switched off (`--safe-mode`, or `--setting-sources=` on older CLIs), so a personal setup such as a Stop hook can't break it. When QA can't run, the error is what the CLI itself reported (usage limit, signed out, timeout, bad model), not its stdin notice.
-
-Standalone, on images you already have (also the quickest way to see why QA isn't running):
-```bash
-node flow-qa.mjs [--prompt prompt.txt] [--rubric photo|surface|library] img0.png img1.png img2.png img3.png
-```
-
 ### `flow-daemon.mjs` — fulfil LinkedIn Command Center's image queue
 
-Runs as a LaunchAgent (`install-daemon.command` once; `update-daemon.command` to pull and restart after an update). It takes one request at a time from the portal and never halts on a bad image:
-
-- **QA passes** → the image is uploaded and attached to its post.
-- **QA fails** → the verdict and the reason are reported; the portal re-queues the request after a backoff with those notes appended to the prompt, and the daemon moves straight on.
-- **QA can't run** (CLI signed out, usage limit) → the image is still saved, held as "awaiting QA", and checked from storage once QA is back — no regeneration.
+Runs as a LaunchAgent (`install-daemon.command` once; `update-daemon.command` to pull and restart after an update). It takes one request at a time from the portal, generates it in Flow, downloads the first image at 2K and uploads it to the post. There is no automated QA: the portal writes every prompt the same way as the LinkedIn images (a fixed realism block plus one short scene line), and every photo still needs your approval in the portal before it's published. A generation error is reported and retried by the portal after a backoff; the daemon moves straight on.
 
 It pauses generation while a harvest runs, and keeps checking in so waiting posts can say why.
 
-### `flow-harvest.mjs` — QA the images already in your project into the portal's library
+### `flow-harvest.mjs` — copy the images already in your project into the portal's library
 
 ```bash
 node flow-harvest.mjs [--limit N] [--res 2K] [--project <url>]   # or double-click harvest.command
 ```
 
-Walks the project grid top to bottom. For every image tile it skips what the portal's library already has (same Flow image URL, or the same picture by hash) and anything already posted on LinkedIn, QAs the rest four at a time with the `library` rubric, downloads the 2K original of each pass into the library, and records each failure with its QA preview and the reason. Carousels then take their base images from the library before asking Flow for new ones. Resumable — run it again any time. If QA can't run it says why: a timeout or overload is retried for up to 15 minutes, a Claude usage limit waits for its reset and carries on, and a sign-in problem stops the run straight away.
+Walks the project grid top to bottom. For every image tile it skips what the portal's library already has (same Flow image URL, or the same picture by hash) and anything already posted on LinkedIn, and downloads the 2K original of the rest into the library as "not reviewed". Nothing is scored automatically: on the portal's Library page you mark the ones to use, and carousels only take approved images. Resumable — run it again any time.
+
+### `flow-qa.mjs` — optional, manual image scoring
+
+Not used by the daemon or the harvester. Scores images with a headless `claude -p` call on your own Claude Code login, which uses a lot of your Claude allowance (about 134k tokens per batch of four), so it's only for one-off checks:
+```bash
+node flow-qa.mjs [--prompt prompt.txt] [--rubric photo|surface|library] img0.png img1.png img2.png img3.png
+```
 
 ### `flow-upload-reference.mjs` — upload + verify + rename a reference asset
 
