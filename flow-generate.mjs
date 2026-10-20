@@ -14,7 +14,11 @@
 //                  (surface in frame, founder gaze, text, looks installed, thumbnail read) and
 //                  download the best one. Prints "QA: PASS|FAIL best=#N score=X/10 — ...".
 //                  On FAIL it downloads the best-scoring image for a caller to review or retry.
-//                  If QA itself cannot run, generation fails closed without a download.
+//                  If QA itself cannot run (CLI signed out, rate-limited, etc.), still downloads
+//                  candidate #0 so the generation isn't lost, but prints "QA: UNAVAILABLE — ..."
+//                  instead of PASS/FAIL — callers must never treat that the same as a pass. The
+//                  portal's own owner-approval gate (unconditional, before schedule/publish) is
+//                  what actually keeps an unverified image from going out, not this script.
 // --project URL    the Flow project to open (e.g. https://flow.google.com/project/<id>).
 //                  Resolved in order: --project flag > FLOW_PROJECT_URL env var >
 //                  ./.flow-project-url (gitignored, one line, for your own default) > error.
@@ -285,7 +289,21 @@ async function main() {
         // (signed out vs. rate-limited vs. anything else) and showing
         // the operator a useless truncated prompt dump instead.
         const reason = (err.stderr && String(err.stderr).trim()) || String(err.message || err).replace(/\s+/g, ' ');
-        throw new Error(`Image QA unavailable: ${reason.slice(0, 300)}`);
+        // 20 Oct: QA unavailable used to fail the whole generation closed
+        // — nothing downloaded, nothing saved, the base images sat in
+        // Flow with no record anywhere else. Operator feedback (same
+        // day): that loses real generation work every time QA can't run,
+        // and it's a recurring problem, not a one-off. Split the concern
+        // instead of reverting the fail-closed fix: still download a
+        // candidate (step 1, "get the base image saved") so nothing is
+        // lost, but mark it UNAVAILABLE rather than PASS so the caller
+        // never treats it as equivalent to a QA-passed image. The actual
+        // safety property fail-closed was protecting — nothing unchecked
+        // reaches Buffer — lives downstream in the portal's unconditional
+        // owner-approval gate (lib/studio/publish.ts) before schedule/
+        // publish, which still applies regardless of this flag.
+        qaNote = `QA: UNAVAILABLE — ${reason.slice(0, 300)}`;
+        flags.download = 0;
       }
       console.log(`[${label}] ${qaNote}`);
     }

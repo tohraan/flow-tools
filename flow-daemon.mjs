@@ -64,7 +64,7 @@ async function fetchPending() {
   return json.requests ?? [];
 }
 
-async function reportComplete(requestId, filePath) {
+async function reportComplete(requestId, filePath, { qaUnverified = false } = {}) {
   const { readFile } = await import('node:fs/promises');
   const bytes = await readFile(filePath);
   const ext = path.extname(filePath).toLowerCase();
@@ -73,6 +73,10 @@ async function reportComplete(requestId, filePath) {
   const form = new FormData();
   form.append('request_id', requestId);
   form.append('file', new Blob([bytes], { type: contentType }), path.basename(filePath));
+  // Portal-side: surfaced as an extra "QA couldn't verify this one" flag
+  // wherever the image is shown for review — it does not skip the
+  // existing unconditional owner-approval gate before schedule/publish.
+  if (qaUnverified) form.append('qa_unverified', 'true');
 
   const res = await fetch(`${APP_URL}/api/flow-queue/complete`, {
     method: 'POST',
@@ -97,14 +101,22 @@ async function fulfillOne(req) {
 
   // --qa: flow-generate.mjs crops Flow's 4 outputs, scores them with
   // flow-qa.mjs and downloads the best. If none of the 4 pass, rerun (a
-  // fresh grid of 4) up to MAX_QA_RUNS times. Never send a failing or
-  // unscored image to the portal.
+  // fresh grid of 4) up to MAX_QA_RUNS times.
+  //
+  // If QA itself can't run (Claude CLI down, rate-limited, etc.),
+  // flow-generate.mjs now still downloads a candidate rather than losing
+  // the generation — printing "QA: UNAVAILABLE" instead of PASS/FAIL.
+  // Retrying won't fix an unavailable CLI the way it can fix a genuinely
+  // bad batch of images, so this breaks immediately rather than burning
+  // MAX_QA_RUNS more generations, and reports the result flagged as
+  // unverified rather than treating it as equivalent to a pass.
   const MAX_QA_RUNS = 3;
   const args = ['flow-generate.mjs', '--file', promptPath, '--label', req.id, '--qa', '--res', '2K'];
   if (req.reference_name) args.push('--reference', req.reference_name);
 
   let stdout;
   let stderr;
+  let qaUnverified = false;
   for (let run = 1; run <= MAX_QA_RUNS; run++) {
     await log(`[${req.id}] generating (run ${run}/${MAX_QA_RUNS})${req.reference_name ? ` (reference: ${req.reference_name})` : ''}...`);
     try {
@@ -138,6 +150,7 @@ async function fulfillOne(req) {
     const qaLine = (stdout.match(/QA: .+/) || [''])[0];
     if (qaLine) await log(`[${req.id}] ${qaLine}`);
     if (qaLine.startsWith('QA: PASS')) break;
+    if (qaLine.startsWith('QA: UNAVAILABLE')) { qaUnverified = true; break; }
     if (!qaLine.startsWith('QA: FAIL')) throw new Error(`Image QA did not pass: ${qaLine || 'no QA result'}`);
     if (run === MAX_QA_RUNS) throw new Error(`Image QA failed after ${MAX_QA_RUNS} attempts: ${qaLine}`);
   }
@@ -150,8 +163,8 @@ async function fulfillOne(req) {
   }
   const downloadedPath = match[1].trim();
 
-  await log(`[${req.id}] generated -> ${downloadedPath}, reporting back...`);
-  await reportComplete(req.id, downloadedPath);
+  await log(`[${req.id}] generated -> ${downloadedPath}${qaUnverified ? ' (QA unverified)' : ''}, reporting back...`);
+  await reportComplete(req.id, downloadedPath, { qaUnverified });
   await log(`[${req.id}] done.`);
 }
 
