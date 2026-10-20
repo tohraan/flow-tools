@@ -7,7 +7,7 @@
 // The only real wait is Flow's own generation time.
 //
 // Usage:
-//   node flow-generate.mjs --file prompt.txt --label "dubai-walk-3" [--download N | --qa] [--res 2K] [--project <url>] [--reference "<asset name>"]
+//   node flow-generate.mjs --file prompt.txt --label "dubai-walk-3" [--download N | --qa [--qa-rubric R] [--qa-file P] [--skip-download-on-fail]] [--res 2K] [--project <url>] [--reference "<asset name>"]
 //
 // --download N     after generation, download the Nth image (0-indexed, left to right) at --res (default 2K)
 // --qa             instead of a fixed index: crop the 4 new images, score them with flow-qa.mjs
@@ -16,9 +16,11 @@
 //                  On FAIL it downloads the best-scoring image for a caller to review or retry.
 //                  If QA itself cannot run (CLI signed out, rate-limited, etc.), still downloads
 //                  candidate #0 so the generation isn't lost, but prints "QA: UNAVAILABLE — ..."
-//                  instead of PASS/FAIL — callers must never treat that the same as a pass. The
-//                  portal's own owner-approval gate (unconditional, before schedule/publish) is
-//                  what actually keeps an unverified image from going out, not this script.
+//                  instead of PASS/FAIL — callers must never treat that the same as a pass.
+//                  Also prints a machine-readable `QA_JSON: {...}` line with the verdict.
+// --qa-rubric R    photo | surface | library | auto (default: read it from the prompt)
+// --qa-file PATH   prompt text QA judges against, when the typed prompt differs (retry notes)
+// --skip-download-on-fail   with --qa: don't download anything when no candidate passes
 // --project URL    the Flow project to open (e.g. https://flow.google.com/project/<id>).
 //                  Resolved in order: --project flag > FLOW_PROJECT_URL env var >
 //                  ./.flow-project-url (gitignored, one line, for your own default) > error.
@@ -40,7 +42,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
-import { assertQaAvailable, runQa, formatQaLine } from './flow-qa.mjs';
+import { assertQaAvailable, runQa, formatQaLine, verdictFor } from './flow-qa.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -79,6 +81,9 @@ function parseFlags(argv) {
     else if (argv[i] === '--res') out.res = argv[++i];
     else if (argv[i] === '--reference') out.reference = argv[++i];
     else if (argv[i] === '--qa') out.qa = true;
+    else if (argv[i] === '--qa-rubric') out.qaRubric = argv[++i];
+    else if (argv[i] === '--qa-file') out.qaFile = argv[++i];
+    else if (argv[i] === '--skip-download-on-fail') out.skipDownloadOnFail = true;
     else if (!out.text) out.text = argv[i];
   }
   return out;
@@ -255,57 +260,55 @@ async function main() {
     await writeFile(shotPath, Buffer.from(data, 'base64'));
 
     // 7b. Optional QA: crop the newest 4 grid images (same ordering the download
-    // step uses) and let flow-qa.mjs pick which index to download.
+    // step uses) and let flow-qa.mjs pick which index to download. A
+    // `QA_JSON: {...}` line follows the human-readable one, for flow-daemon.mjs
+    // to report the verdict (scores, why it failed, setting, Flow's image URL).
     let qaNote = '';
     if (flags.qa) {
+      let tiles = [];
       try {
-        const rects = await evalJson(send, `(() => {
-          const imgs = Array.from(document.querySelectorAll('img')).map(el => el.getBoundingClientRect()).filter(r => r.width > 50);
+        tiles = await evalJson(send, `(() => {
+          const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50)
+            .map(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, src: el.currentSrc || el.src || '' }; });
           imgs.sort((a,b) => a.y - b.y || a.x - b.x);
-          return imgs.slice(0, 4).map(r => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
+          return imgs.slice(0, 4);
         })()`);
-        if (!rects || rects.length === 0) throw new Error('no grid images found to crop');
+        if (!tiles || tiles.length === 0) throw new Error('no grid images found to crop');
         const qaDir = path.join(DOWNLOADS_DIR, 'qa', shotName.replace(/\.png$/, ''));
         await mkdir(qaDir, { recursive: true });
         const crops = [];
-        for (let i = 0; i < rects.length; i++) {
+        for (let i = 0; i < tiles.length; i++) {
+          const { src, ...rect } = tiles[i];
           const { data: crop } = await send('Page.captureScreenshot', {
-            format: 'png', captureBeyondViewport: true, clip: { ...rects[i], scale: 2 },
+            format: 'png', captureBeyondViewport: true, clip: { ...rect, scale: 2 },
           });
           const cropPath = path.join(qaDir, `${i}.png`);
           await writeFile(cropPath, Buffer.from(crop, 'base64'));
           crops.push(cropPath);
         }
         console.log(`[${label}] QA: scoring ${crops.length} images...`);
-        const result = await runQa({ imagePaths: crops, promptText: text });
+        // QA judges against the original brief (--qa-file); the typed prompt may carry retry notes.
+        const qaText = flags.qaFile ? await readFile(flags.qaFile, 'utf8') : text;
+        const result = await runQa({ imagePaths: crops, promptText: qaText, rubric: flags.qaRubric || 'auto' });
         qaNote = formatQaLine(result);
-        flags.download = result.best;
+        flags.download = result.pass || !flags.skipDownloadOnFail ? result.best : undefined;
+        console.log(`[${label}] ${qaNote}`);
+        console.log(`QA_JSON: ${JSON.stringify({ status: result.pass ? 'pass' : 'fail', best: result.best, verdict: verdictFor(result), thumbKey: tiles[result.best]?.src || null, cropPath: crops[result.best] || null })}`);
       } catch (err) {
         // A failed `claude -p ...` call's real reason is in stderr (Node
         // attaches it to the rejected error for promisified execFile) —
         // the first line of err.message is just the echoed command-line,
-        // which for this call is the QA instruction text itself, so
-        // `.split('\n')[0]` was silently discarding the actual cause
-        // (signed out vs. rate-limited vs. anything else) and showing
-        // the operator a useless truncated prompt dump instead.
+        // which for this call is the QA instruction text itself, so it
+        // can't stand in for the actual cause.
         const reason = (err.stderr && String(err.stderr).trim()) || String(err.message || err).replace(/\s+/g, ' ');
-        // 20 Oct: QA unavailable used to fail the whole generation closed
-        // — nothing downloaded, nothing saved, the base images sat in
-        // Flow with no record anywhere else. Operator feedback (same
-        // day): that loses real generation work every time QA can't run,
-        // and it's a recurring problem, not a one-off. Split the concern
-        // instead of reverting the fail-closed fix: still download a
-        // candidate (step 1, "get the base image saved") so nothing is
-        // lost, but mark it UNAVAILABLE rather than PASS so the caller
-        // never treats it as equivalent to a QA-passed image. The actual
-        // safety property fail-closed was protecting — nothing unchecked
-        // reaches Buffer — lives downstream in the portal's unconditional
-        // owner-approval gate (lib/studio/publish.ts) before schedule/
-        // publish, which still applies regardless of this flag.
+        // QA couldn't run (CLI signed out, rate-limited, etc.). Still save a
+        // candidate so the generation isn't lost, marked UNAVAILABLE, never
+        // PASS: the portal holds it until QA can run on the stored file.
         qaNote = `QA: UNAVAILABLE — ${reason.slice(0, 300)}`;
         flags.download = 0;
+        console.log(`[${label}] ${qaNote}`);
+        console.log(`QA_JSON: ${JSON.stringify({ status: 'unavailable', best: 0, reason: reason.slice(0, 300), thumbKey: tiles[0]?.src || null })}`);
       }
-      console.log(`[${label}] ${qaNote}`);
     }
 
     // 8. Optional: download the Nth image at the requested resolution.

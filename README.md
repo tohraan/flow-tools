@@ -110,15 +110,37 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" [options]
 | `--res <1K\|2K\|4K>` | Resolution for `--download` (default `2K`) |
 | `--project <url>` | Flow project URL (else: `FLOW_PROJECT_URL` env var, else `.flow-project-url`) |
 | `--reference <name>` | Insert an inline `@mention` of an already-uploaded asset before the prompt text — the real identity-lock mechanism (see above) |
+| `--qa` | Score the 4 new images with `flow-qa.mjs` and download the best; prints `QA: PASS\|FAIL\|UNAVAILABLE` and a machine-readable `QA_JSON:` line |
+| `--qa-rubric <r>` | `photo`, `surface`, `library`, or `auto` (read it from the prompt) |
+| `--qa-file <path>` | Prompt text QA judges against, when the typed prompt differs (e.g. retry notes appended) |
+| `--skip-download-on-fail` | With `--qa`: download nothing when no candidate passes |
 
 ### `flow-qa.mjs` — pick the best of the 4 outputs automatically
 
-`flow-generate.mjs --qa` (used by `flow-daemon.mjs`) first checks that the Claude CLI is signed in. It scores four candidates against either the text-surface brief or the new text-free photo-overlay brief (realism, subject, absence of embedded text, clean overlay space, and scene relevance). A score below 8/10 or zero on a required check fails. The daemon reruns a failing grid up to three times. If QA is signed out or still fails, the queue request fails visibly; it never accepts the first or a failing image. Exact founder likeness still requires owner approval in the portal.
+Scores images with a headless `claude -p` call (your own Claude Code login, no API key) on one of three rubrics: **surface** (a format-hijack single-post image with on-image text), **photo** (a text-free carousel base generated against a brief: realism, subject, no lettering, clear overlay space, scene relevance) and **library** (the same, without a brief — for images already in the project). A score below 8/10 or a zero on a required check fails. Every verdict also carries a coarse `setting` from a fixed list, a short description, and a note on why it fell short. Exact founder likeness still requires owner approval in the portal.
 
 Standalone, on images you already have:
 ```bash
-node flow-qa.mjs --prompt prompt.txt img0.png img1.png img2.png img3.png
+node flow-qa.mjs [--prompt prompt.txt] [--rubric photo|surface|library] img0.png img1.png img2.png img3.png
 ```
+
+### `flow-daemon.mjs` — fulfil LinkedIn Command Center's image queue
+
+Runs as a LaunchAgent (`install-daemon.command` once; `update-daemon.command` to pull and restart after an update). It takes one request at a time from the portal and never halts on a bad image:
+
+- **QA passes** → the image is uploaded and attached to its post.
+- **QA fails** → the verdict and the reason are reported; the portal re-queues the request after a backoff with those notes appended to the prompt, and the daemon moves straight on.
+- **QA can't run** (CLI signed out, usage limit) → the image is still saved, held as "awaiting QA", and checked from storage once QA is back — no regeneration.
+
+It pauses generation while a harvest runs, and keeps checking in so waiting posts can say why.
+
+### `flow-harvest.mjs` — QA the images already in your project into the portal's library
+
+```bash
+node flow-harvest.mjs [--limit N] [--res 2K] [--project <url>]   # or double-click harvest.command
+```
+
+Walks the project grid top to bottom. For every image tile it skips what the portal's library already has (same Flow image URL, or the same picture by hash) and anything already posted on LinkedIn, QAs the rest four at a time with the `library` rubric, downloads the 2K original of each pass into the library, and records each failure with its QA preview and the reason. Carousels then take their base images from the library before asking Flow for new ones. Resumable — run it again any time.
 
 ### `flow-upload-reference.mjs` — upload + verify + rename a reference asset
 
