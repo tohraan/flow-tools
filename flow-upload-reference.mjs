@@ -34,6 +34,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { clickTarget, positionTarget } from './flow-lib.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -119,22 +120,12 @@ async function openUploadDialog(send, attempts = 3) {
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
     await sleep(300);
 
-    const plusPos = await evalJson(send, `(() => {
-      const b = document.querySelector('button[aria-label="Add ingredients to the prompt box"]');
-      if (!b) return null;
-      const r = b.getBoundingClientRect();
-      return { x: r.x + r.width/2, y: r.y + r.height/2 };
-    })()`);
+    const plusPos = await positionTarget(send, `document.querySelector('button[aria-label="Add ingredients to the prompt box"]')`);
     if (!plusPos) throw new Error('"+" ingredients button not found — is the prompt box visible?');
     await clickAt(send, plusPos.x, plusPos.y);
     await sleep(500);
 
-    const uploadPos = await evalJson(send, `(() => {
-      const el = document.querySelector('span.upload-text');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x + r.width/2, y: r.y + r.height/2 };
-    })()`);
+    const uploadPos = await positionTarget(send, `document.querySelector('span.upload-text')`);
     if (!uploadPos) {
       console.error(`[upload] attempt ${attempt}: picker didn't open, retrying...`);
       continue;
@@ -158,15 +149,10 @@ async function waitForAssetReady(send, searchTerm, timeoutMs = 20000) {
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
     await sleep(200);
-    await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`);
-    const boxPos = await evalJson(send, `(() => {
-      const el = Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x + r.width/2, y: r.y + r.height/2 };
-    })()`);
+    await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
+    const boxPos = await positionTarget(send, `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?')`);
     if (!boxPos) { await sleep(1000); continue; }
-    await clickAt(send, boxPos.x, boxPos.y);
+    await clickTarget(send, `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?')`);
     await sleep(150);
     await send('Input.insertText', { text: '@' });
     await sleep(400);
@@ -190,33 +176,19 @@ async function waitForAssetReady(send, searchTerm, timeoutMs = 20000) {
 }
 
 async function renameUploadedAsset(send, newName) {
-  await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`);
-  const uploadsTabPos = await evalJson(send, `(() => {
-    const el = Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='Uploads');
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return { x: r.x + r.width/2, y: r.y + r.height/2 };
-  })()`);
+  await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
+  const uploadsTabPos = await positionTarget(send, `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='Uploads')`);
   if (!uploadsTabPos) throw new Error('Uploads sidebar tab not found');
   await clickAt(send, uploadsTabPos.x, uploadsTabPos.y);
   await sleep(700);
 
   // Newest upload is the first thumbnail in the Uploads tab.
-  const thumbPos = await evalJson(send, `(() => {
-    const imgs = Array.from(document.querySelectorAll('img')).map(el => el.getBoundingClientRect()).filter(r => r.width > 50);
-    const r = imgs[0];
-    return r ? { x: r.x + r.width/2, y: r.y + r.height/2 } : null;
-  })()`);
+  const thumbPos = await positionTarget(send, `Array.from(document.querySelectorAll('img')).find(el => el.getBoundingClientRect().width > 50)`);
   if (!thumbPos) throw new Error('No uploaded asset found in the Uploads tab to rename');
   await clickAt(send, thumbPos.x, thumbPos.y, 'right');
   await sleep(500);
 
-  const renamePos = await evalJson(send, `(() => {
-    const els = Array.from(document.querySelectorAll('*')).filter(e => e.children.length===0 && (e.textContent||'').trim()==='Rename');
-    if (!els.length) return null;
-    const r = els[0].getBoundingClientRect();
-    return { x: r.x + r.width/2, y: r.y + r.height/2 };
-  })()`);
+  const renamePos = await positionTarget(send, `Array.from(document.querySelectorAll('*')).find(e => e.children.length===0 && (e.textContent||'').trim()==='Rename')`);
   if (!renamePos) throw new Error('"Rename" context menu item not found');
   await clickAt(send, renamePos.x, renamePos.y);
   await sleep(400);
@@ -226,14 +198,13 @@ async function renameUploadedAsset(send, newName) {
   await send('Input.insertText', { text: newName });
   await sleep(200);
 
-  const confirmPos = await evalJson(send, `(() => {
+  const confirmPos = await positionTarget(send, `(() => {
     const inp = document.querySelector('input.editable-text-input.editing');
     if (!inp) return null;
     const container = inp.closest('div');
     const btns = container ? Array.from(container.querySelectorAll('button')) : [];
     if (!btns.length) return null;
-    const r = btns[0].getBoundingClientRect();
-    return { x: r.x + r.width/2, y: r.y + r.height/2 };
+    return btns[0];
   })()`);
   if (!confirmPos) throw new Error('Rename confirm button not found');
   await clickAt(send, confirmPos.x, confirmPos.y);

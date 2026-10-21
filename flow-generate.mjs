@@ -43,6 +43,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import { assertQaAvailable, runQa, formatQaLine, verdictFor } from './flow-qa.mjs';
+import { clickTarget, downloadAt, positionTarget } from './flow-lib.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -177,19 +178,14 @@ async function pressEscape(send) {
 // with "not found" — so this polls for up to 8s and tries three times. If
 // the asset never appears it saves a screenshot of what Flow actually showed.
 async function insertReference(send, name, boxPos, label) {
-  const findAdd = `(() => {
-    const b = Array.from(document.querySelectorAll('button')).find(e => (e.textContent||'').trim()==='Add to prompt' && e.getBoundingClientRect().width > 0);
-    if (!b) return null;
-    const r = b.getBoundingClientRect();
-    return { x: r.x + r.width/2, y: r.y + r.height/2 };
-  })()`;
+  const findAdd = `Array.from(document.querySelectorAll('button')).find(e => (e.textContent||'').trim()==='Add to prompt' && e.getBoundingClientRect().width > 0)`;
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (attempt > 1) {
       // Start the mention again from an empty prompt box.
       await pressEscape(send);
-      await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`);
+      await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
       await sleep(400);
-      await clickAt(send, boxPos.x, boxPos.y);
+      await clickTarget(send, `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?')`);
       await sleep(200);
     }
     await send('Input.insertText', { text: '@' });
@@ -197,7 +193,7 @@ async function insertReference(send, name, boxPos, label) {
     await send('Input.insertText', { text: name });
     for (const deadline = Date.now() + 8000; Date.now() < deadline; ) {
       await sleep(400);
-      const addPos = await evalJson(send, findAdd);
+      const addPos = await positionTarget(send, findAdd);
       if (!addPos) continue;
       await clickAt(send, addPos.x, addPos.y);
       await sleep(400);
@@ -215,7 +211,7 @@ async function insertReference(send, name, boxPos, label) {
   const onScreen = await evalJson(send, `Array.from(document.querySelectorAll('button')).filter(b => b.getBoundingClientRect().width > 0).map(b => (b.textContent || b.getAttribute('aria-label') || '').trim()).filter(t => t && t.length < 40).slice(0, 20)`).catch(() => []);
   // Leave the prompt box clean for the next request.
   await pressEscape(send);
-  await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`).catch(() => {});
+  await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
   throw new Error(`Reference asset "${name}" not found in the @mention picker after 3 tries (8s each). Check an asset named "${name}" still exists in this Flow project. Screenshot: ${shot}. Buttons on screen: ${onScreen.join(' | ') || 'none'}`);
 }
 
@@ -247,15 +243,11 @@ async function main() {
     }
 
     // 2. Clear any leftover prompt text, then focus the box
-    await evalJson(send, `(() => { const b = document.querySelector('button[aria-label="Clear prompt"]'); if (b) b.click(); })()`);
-    const boxPos = await evalJson(send, `(() => {
-      const el = Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x + r.width/2, y: r.y + r.height/2 };
-    })()`);
+    await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
+    const promptBoxExpression = `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?')`;
+    const boxPos = await positionTarget(send, promptBoxExpression);
     if (!boxPos) throw new Error('Prompt box not found');
-    await clickAt(send, boxPos.x, boxPos.y);
+    await clickTarget(send, promptBoxExpression);
     await sleep(100);
 
     // 3. If a reference asset was requested, insert it as an inline @mention FIRST —
@@ -266,14 +258,9 @@ async function main() {
     await send('Input.insertText', { text });
 
     // 5. Click Start generation (real CDP mouse event — JS .click() does not register on this app)
-    const genPos = await evalJson(send, `(() => {
-      const el = document.querySelector('button[aria-label="Start generation"]');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x + r.width/2, y: r.y + r.height/2 };
-    })()`);
-    if (!genPos) throw new Error('Start generation button not found');
-    await clickAt(send, genPos.x, genPos.y);
+    const genPos = await positionTarget(send, `document.querySelector('button[aria-label="Start generation"]')`);
+    if (!genPos) throw new Error('Start generation button not found or not visible');
+    await clickTarget(send, `document.querySelector('button[aria-label="Start generation"]')`);
     console.log(`[${label}] Submitted. Waiting for generation...`);
 
     // 6. Poll for completion: wait for % markers to appear, then disappear.
@@ -353,12 +340,11 @@ async function main() {
     let downloadedNote = '';
     if (flags.download != null && !Number.isNaN(flags.download)) {
       const n = flags.download;
-      const pos = await evalJson(send, `(() => {
-        const imgs = Array.from(document.querySelectorAll('img')).map(el => el.getBoundingClientRect()).filter(r => r.width > 50);
-        imgs.sort((a,b) => a.y - b.y || a.x - b.x);
-        const r = imgs[${n}];
-        return r ? { x: r.x + r.width/2, y: r.y + r.height/2 } : null;
-      })()`);
+      const imageExpression = `(() => {
+        const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50);
+        imgs.sort((a,b) => { const ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect(); return ra.y-rb.y || ra.x-rb.x; });
+        return imgs[${n}] || null;
+      })()`;
       // Flow's URL for the downloaded tile, so the portal's library can tell a
       // later harvest that this image is already in it.
       const tileSrc = await evalJson(send, `(() => {
@@ -368,40 +354,10 @@ async function main() {
         return el ? (el.currentSrc || el.src || '') : '';
       })()`).catch(() => '');
       if (/^https?:/.test(tileSrc || '')) console.log(`TILE_SRC: ${tileSrc.slice(0, 500)}`);
-      if (pos) {
-        await clickAt(send, pos.x, pos.y, 'right');
-        await sleep(600);
-        const dlPos = await evalJson(send, `(() => {
-          const els = Array.from(document.querySelectorAll('*')).filter(e => e.children.length===0 && (e.textContent||'').trim()==='Download');
-          if (!els.length) return null;
-          const r = els[0].getBoundingClientRect();
-          return { x: r.x + r.width/2, y: r.y + r.height/2 };
-        })()`);
-        if (dlPos) {
-          await clickAt(send, dlPos.x, dlPos.y);
-          await sleep(600);
-          const resPos = await evalJson(send, `(() => {
-            const els = Array.from(document.querySelectorAll('*')).filter(e => e.children.length===0 && (e.textContent||'').trim()===${JSON.stringify(flags.res)});
-            if (!els.length) return null;
-            const r = els[0].getBoundingClientRect();
-            return { x: r.x + r.width/2, y: r.y + r.height/2 };
-          })()`);
-          if (resPos) {
-            const clickTime = Date.now();
-            await clickAt(send, resPos.x, resPos.y);
-            const movedTo = await waitAndMoveDownload(clickTime);
-            downloadedNote = movedTo
-              ? `Downloaded image #${n} at ${flags.res} -> ${movedTo}`
-              : `Clicked ${flags.res} but no new file appeared in ${CHROME_DEFAULT_DOWNLOADS} within 20s`;
-            (movedTo ? console.log : console.error)(`[${label}] ${downloadedNote}`);
-          } else {
-            downloadedNote = `Could not find resolution option "${flags.res}"`;
-            console.error(`[${label}] ${downloadedNote}`);
-          }
-        } else {
-          downloadedNote = 'Could not find Download menu item';
-          console.error(`[${label}] ${downloadedNote}`);
-        }
+      if (await positionTarget(send, imageExpression)) {
+        const movedTo = await downloadAt(send, imageExpression, flags.res);
+        downloadedNote = `Downloaded image #${n} at ${flags.res} -> ${movedTo}`;
+        console.log(`[${label}] ${downloadedNote}`);
       } else {
         downloadedNote = `No image at index ${n}`;
         console.error(`[${label}] ${downloadedNote}`);

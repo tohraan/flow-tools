@@ -83,6 +83,30 @@ export async function clickAt(send, x, y, button = 'left') {
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount: 1 });
 }
 
+// Resolve a UI target immediately before interacting with it. Flow's grid and
+// menus move as batches load, so callers pass a DOM expression that returns
+// the target element; we scroll it to a consistent viewport position, measure
+// it again, validate the hit point, then send real CDP input at that point.
+export async function positionTarget(send, targetExpression) {
+  return evalJson(send, `(async () => {
+    const el = (${targetExpression});
+    if (!el || !el.isConnected) return null;
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    if (r.width <= 0 || r.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+    return { x, y };
+  })()`);
+}
+
+export async function clickTarget(send, targetExpression, button = 'left') {
+  const point = await positionTarget(send, targetExpression);
+  if (!point) throw new Error('Flow target is missing or outside the viewport');
+  await clickAt(send, point.x, point.y, button);
+  return point;
+}
+
 // ---- image hashing -------------------------------------------------------
 
 function mimeFor(file) {
@@ -165,26 +189,58 @@ async function waitAndMoveDownload(since, timeoutMs = 25000) {
 }
 
 async function leafCenter(send, text) {
-  return evalJson(send, `(() => {
-    const el = Array.from(document.querySelectorAll('*')).find(e => e.children.length===0 && (e.textContent||'').trim()===${JSON.stringify(text)});
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return { x: r.x + r.width/2, y: r.y + r.height/2 };
-  })()`);
+  const safeText = JSON.stringify(text);
+  return positionTarget(send, `Array.from(document.querySelectorAll('*')).find(e => e.children.length===0 && (e.textContent||'').trim()===${safeText})`);
 }
 
-// The same right-click → Download → resolution sequence flow-generate.mjs uses.
-export async function downloadAt(send, center, res = '2K') {
-  await clickAt(send, center.x, center.y, 'right');
-  await sleep(600);
+async function clickMenuPath(send, imageExpression, mode, res) {
+  const image = await positionTarget(send, imageExpression);
+  if (!image) throw new Error('Could not position the selected image');
+  if (mode === 'more') {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: image.x, y: image.y });
+    await sleep(250);
+    const moreExpression = `(() => {
+      const img = (${imageExpression});
+      for (let p = img?.parentElement; p && p !== document.body; p = p.parentElement) {
+        const b = p.querySelector('button[aria-label="More"],button[aria-label="More options"]');
+        if (b && b.getBoundingClientRect().width > 0) return b;
+      }
+      return Array.from(document.querySelectorAll('button[aria-label="More"],button[aria-label="More options"]')).find(b => b.getBoundingClientRect().width > 0) || null;
+    })()`;
+    await clickTarget(send, moreExpression);
+  } else {
+    await clickAt(send, image.x, image.y, 'right');
+  }
+  await sleep(350);
   const dl = await leafCenter(send, 'Download');
-  if (!dl) { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' }); throw new Error('Could not find the Download menu item'); }
+  if (!dl) throw new Error('Could not find the Download menu item');
   await clickAt(send, dl.x, dl.y);
-  await sleep(600);
-  const r = await leafCenter(send, res);
-  if (!r) { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' }); throw new Error(`Could not find resolution option "${res}"`); }
+  await sleep(350);
+  const resPoint = await leafCenter(send, res);
+  if (!resPoint) throw new Error(`Could not find resolution option "${res}"`);
+  return resPoint;
+}
+
+// Supports Flow's two observed routes: hover > More > Download > resolution,
+// then right-click > Download > resolution as a fallback.
+export async function downloadAt(send, imageExpression, res = '2K') {
+  let resPoint;
+  let firstError;
+  try {
+    resPoint = await clickMenuPath(send, imageExpression, 'more', res);
+  } catch (err) {
+    firstError = err;
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' }).catch(() => {});
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }).catch(() => {});
+    try { resPoint = await clickMenuPath(send, imageExpression, 'context', res); }
+    catch (fallbackError) {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' }).catch(() => {});
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }).catch(() => {});
+      throw new Error(`Both Flow download routes failed (More: ${firstError.message}; right-click: ${fallbackError.message})`);
+    }
+  }
   const since = Date.now();
-  await clickAt(send, r.x, r.y);
+  await clickAt(send, resPoint.x, resPoint.y);
   const moved = await waitAndMoveDownload(since);
   if (!moved) throw new Error(`Clicked ${res} but no new file appeared in ${CHROME_DEFAULT_DOWNLOADS}`);
   return moved;

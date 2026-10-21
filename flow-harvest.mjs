@@ -162,7 +162,8 @@ async function main() {
           const center = await evalJson(send, centerOf(src));
           if (!center) throw new Error('tile scrolled out of reach before download');
           await sleep(400);
-          const file = await downloadAt(send, center, flags.res);
+          const imageExpression = `Array.from(document.querySelectorAll('img')).find(e => (e.currentSrc || e.src) === ${JSON.stringify(src)})`;
+          const file = await downloadAt(send, imageExpression, flags.res);
           await clickAt(send, 2, 2); // dismiss any leftover menu
           const full = await hashFile(helper, file);
           if (nearAny(full.hash, usedHashes)) { stats.alreadyOnLinkedIn++; continue; }
