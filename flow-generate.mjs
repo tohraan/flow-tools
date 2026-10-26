@@ -24,6 +24,8 @@
 // --project URL    the Flow project to open (e.g. https://flow.google.com/project/<id>).
 //                  Resolved in order: --project flag > FLOW_PROJECT_URL env var >
 //                  ./.flow-project-url (gitignored, one line, for your own default) > error.
+// --tab ID        the CDP target id of the Flow tab to use (default: the first Flow tab).
+//                  flow-daemon-v2.mjs gives each parallel run its own tab.
 // --reference STR  for identity-locked prompts: inserts an inline @mention of a previously
 //                  uploaded image/asset (matched by name) BEFORE typing the prompt text, the
 //                  same way typing "@" in Flow's own UI opens its asset picker. This is the
@@ -81,6 +83,7 @@ function parseFlags(argv) {
     else if (argv[i] === '--download') out.download = Number(argv[++i]);
     else if (argv[i] === '--res') out.res = argv[++i];
     else if (argv[i] === '--reference') out.reference = argv[++i];
+    else if (argv[i] === '--tab') out.tab = argv[++i];
     else if (argv[i] === '--qa') out.qa = true;
     else if (argv[i] === '--qa-rubric') out.qaRubric = argv[++i];
     else if (argv[i] === '--qa-file') out.qaFile = argv[++i];
@@ -118,11 +121,12 @@ async function waitAndMoveDownload(since, timeoutMs = 20000) {
   return null;
 }
 
-async function connect(port, match) {
+async function connect(port, match, tabId) {
   const res = await fetch(`http://127.0.0.1:${port}/json/list`);
   const targets = await res.json();
   const pages = targets.filter((t) => t.type === 'page');
-  const target = pages.find((t) => t.url.includes(match));
+  // --tab pins this run to one Flow tab so several runs can work side by side.
+  const target = tabId ? pages.find((t) => t.id === tabId) : pages.find((t) => t.url.includes(match));
   if (!target) throw new Error(`No tab matching "${match}" on port ${port}. Is Chrome running? (flow-launch-chrome.sh)`);
 
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -227,7 +231,7 @@ async function main() {
   const projectUrl = await resolveProjectUrl(flags.project);
   if (flags.qa) await assertQaAvailable();
 
-  const { ws, send } = await connect(PORT, MATCH);
+  const { ws, send } = await connect(PORT, MATCH, flags.tab);
 
   try {
     // 1. Make sure we're on the pinned project (skip navigation if already there — saves time)
