@@ -19,10 +19,14 @@ echo "Pulling latest flow-tools..."
 git pull --ff-only
 
 echo "Restarting the Flow daemon..."
-launchctl unload "$PLIST_DEST" 2>/dev/null || true
-launchctl load "$PLIST_DEST"
+for name in flow-daemon flow-chrome flow-watchdog; do
+  dest="$HOME/Library/LaunchAgents/com.tohraan.$name.plist"
+  [ -f "$dest" ] || continue
+  launchctl unload "$dest" 2>/dev/null || true
+  launchctl load "$dest"
+done
 
 echo ""
-echo "Updated and restarted. Logs: /tmp/flow-daemon.log and /tmp/flow-daemon.error.log"
+echo "Updated and restarted. Logs: ~/Flow/logs/*.jsonl, /tmp/flow-daemon.log, /tmp/flow-daemon.error.log"
 echo ""
 read -p "Press Enter to close this window..."

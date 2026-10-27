@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Starts the automation Chrome (debug port 9222, Flow project open) at login, without stealing focus. -->
+  <key>Label</key>
+  <string>com.tohraan.flow-chrome</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>FLOW_TOOLS_DIR/flow-launch-chrome.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/flow-chrome.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/flow-chrome.error.log</string>
+</dict>
+</plist>

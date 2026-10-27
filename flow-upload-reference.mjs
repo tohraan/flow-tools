@@ -34,7 +34,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { clickTarget, positionTarget } from './flow-lib.mjs';
+import { clickTarget, positionTarget, ensureFlow } from './flow-lib.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -62,6 +62,7 @@ async function resolveProjectUrl(flagValue) {
 }
 
 async function connect(port, match) {
+  await ensureFlow(port, match);
   const res = await fetch(`http://127.0.0.1:${port}/json/list`);
   const targets = await res.json();
   const pages = targets.filter((t) => t.type === 'page');

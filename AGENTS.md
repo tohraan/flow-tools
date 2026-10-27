@@ -45,3 +45,11 @@ node flow-generate.mjs --file <prompt.txt> --label "<name>" \
 ```
 
 Known rough edges (not blockers, just things to expect) are documented in `README.md`'s "Known gotchas" section and in `~/Flow/build-log.md`'s run history — read those before concluding something is broken; it may already be a documented, worked-around issue.
+
+## Unattended running, logs and away mode (added 27 Oct 2026)
+
+- Logs: `~/Flow/logs/<source>-YYYY-MM-DD.jsonl` (structured, 14-day retention), `~/Flow/build-log.md` (human), the portal's `flow_events` (via `~/Flow/outbox.jsonl`). When debugging, read the JSONL first; every line has `run_id`, `seq`, `kind`, and `request_id` when it belongs to an image.
+- Three LaunchAgents: `com.tohraan.flow-daemon` (v2, wrapped in `caffeinate -i`), `com.tohraan.flow-chrome` (Chrome at login), `com.tohraan.flow-watchdog` (restarts a hung daemon). Installed by `install-daemon.command`, reloaded by `update-daemon.command`. Never print or commit the plist's `FLOW_DAEMON_SECRET`.
+- `./flow-away-mode.command on|off|status` toggles `pmset disablesleep` (needs the owner's sudo password; do not run it for them). Warn the owner it should be on the charger.
+- Don't edit infrastructure failures into attempt-burning ones: network/DNS/Chrome-not-ready/Google-signed-out errors must stay "setup" on the portal (`src/lib/queue/failure.ts`).
+- Decisions and change history live in `docs/DECISIONS.md` and `docs/CHANGELOG.md`.

@@ -10,6 +10,8 @@
 import { readFile, writeFile, readdir, rename, stat, mkdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 export const PORT = 9222;
 export const FLOW_MATCH = 'flow.google.com';
@@ -19,6 +21,45 @@ const CHROME_DEFAULT_DOWNLOADS = path.join(homedir(), 'Downloads');
 const LOCK_FILE = path.join(FLOW_DIR, '.harvest.lock');
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Make sure Chrome (automation profile, debug port) is up with a Flow tab.
+ * Launches flow-launch-chrome.sh if the port is closed and waits for it, so
+ * callers never need the launch command run by hand. Throws a clear message
+ * if Chrome comes up but Google is signed out (a human has to log in once).
+ */
+export async function ensureFlow(port = PORT, match = FLOW_MATCH, timeoutMs = 45_000) {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const list = async () => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) });
+      return (await r.json()).filter((t) => t.type === 'page');
+    } catch { return null; }
+  };
+  let pages = await list();
+  if (!pages) {
+    spawn('/bin/bash', [path.join(dir, 'flow-launch-chrome.sh')], { detached: true, stdio: 'ignore' }).unref();
+  }
+  const deadline = Date.now() + timeoutMs;
+  let opened = false;
+  while (Date.now() < deadline) {
+    pages = await list();
+    if (pages) {
+      if (pages.some((t) => t.url.includes(match))) return;
+      if (pages.some((t) => t.url.includes('accounts.google.com'))) {
+        throw new Error('Chrome is running but Google is signed out. Log into Google once in the automation Chrome window, then retry.');
+      }
+      if (!opened && pages.length) {
+        opened = true;
+        let url = 'https://flow.google.com';
+        try { url = (await readFile(path.join(dir, '.flow-project-url'), 'utf8')).split('\n')[0].trim() || url; } catch {}
+        await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' }).catch(() => {});
+      }
+    }
+    await sleep(1500);
+  }
+  throw new Error(`Chrome/Flow not ready on port ${port} after ${timeoutMs / 1000}s (ran flow-launch-chrome.sh).`);
+}
 
 function wire(ws) {
   let id = 0;
@@ -49,6 +90,7 @@ async function open(wsUrl) {
 }
 
 export async function connectTab(match = FLOW_MATCH, port = PORT) {
+  await ensureFlow(port, match);
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const target = targets.filter((t) => t.type === 'page').find((t) => t.url.includes(match));
   if (!target) throw new Error(`No tab matching "${match}" on port ${port}. Is Chrome running? (flow-launch-chrome.sh)`);
@@ -272,8 +314,9 @@ export function portal({ appUrl, secret }) {
     return res.json();
   }
   return {
-    get: async (p) => check(await fetch(`${appUrl}${p}`, { headers }), `GET ${p}`),
-    postJson: async (p, body) => check(await fetch(`${appUrl}${p}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), `POST ${p}`),
+    get: async (p) => check(await fetch(`${appUrl}${p}`, { headers, signal: AbortSignal.timeout(30_000) }), `GET ${p}`),
+    // Every portal call has a timeout: a TCP connection that died while the Mac slept would otherwise hang the daemon's loop forever.
+    postJson: async (p, body) => check(await fetch(`${appUrl}${p}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) }), `POST ${p}`),
     // fields: plain values; objects/arrays are JSON-encoded. file: local path.
     postForm: async (p, fields, file) => {
       const form = new FormData();
@@ -282,10 +325,10 @@ export function portal({ appUrl, secret }) {
         form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
       }
       if (file) form.append('file', new Blob([await readFile(file)], { type: mimeFor(file) }), path.basename(file));
-      return check(await fetch(`${appUrl}${p}`, { method: 'POST', headers, body: form }), `POST ${p}`);
+      return check(await fetch(`${appUrl}${p}`, { method: 'POST', headers, body: form, signal: AbortSignal.timeout(120_000) }), `POST ${p}`);
     },
     download: async (url, dest) => {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
       if (!res.ok) throw new Error(`download ${url} failed: HTTP ${res.status}`);
       await writeFile(dest, Buffer.from(await res.arrayBuffer()));
       return dest;

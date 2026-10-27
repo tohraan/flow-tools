@@ -45,7 +45,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import { assertQaAvailable, runQa, formatQaLine, verdictFor } from './flow-qa.mjs';
-import { clickTarget, downloadAt, positionTarget } from './flow-lib.mjs';
+import { clickTarget, downloadAt, positionTarget, ensureFlow } from './flow-lib.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -122,6 +122,7 @@ async function waitAndMoveDownload(since, timeoutMs = 20000) {
 }
 
 async function connect(port, match, tabId) {
+  await ensureFlow(port, match);
   const res = await fetch(`http://127.0.0.1:${port}/json/list`);
   const targets = await res.json();
   const pages = targets.filter((t) => t.type === 'page');

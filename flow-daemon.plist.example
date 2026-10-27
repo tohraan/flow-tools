@@ -6,8 +6,11 @@
   <string>com.tohraan.flow-daemon</string>
   <key>ProgramArguments</key>
   <array>
+    <!-- caffeinate -i: no idle sleep while the daemon runs (lid-closed sleep needs flow-away-mode). -->
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
     <string>/usr/local/bin/node</string>
-    <string>FLOW_TOOLS_DIR/flow-daemon.mjs</string>
+    <string>FLOW_TOOLS_DIR/flow-daemon-v2.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

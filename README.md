@@ -181,6 +181,20 @@ Chrome exposes a debugging API over WebSocket (the [Chrome DevTools Protocol](ht
 
 No browser automation framework, no binary downloads, no bundler — just the protocol Chrome already speaks.
 
+## Running unattended: sleep, wake, logs and alerts
+
+The daemon is built to be left alone. What it does so the portal never shows an error because the Mac was away:
+
+- **Chrome starts itself.** `com.tohraan.flow-chrome` launches the automation Chrome (Flow project open) at login, and `flow-generate`, `flow-upload-reference` and the harvester call `ensureFlow()` to start it if it isn't up. `flow-launch-chrome.sh` is idempotent.
+- **Waiting is not failing.** If Chrome or Flow isn't ready, the daemon claims nothing and tells the portal why (`flow_ready` / `flow_reason`). The portal shows "Waiting for your Mac", spends no attempt, and the queue catches up when the Mac is back (4 images at once by default).
+- **Sleep and wake.** A loop that was due every few seconds but didn't run for 60 s means the Mac slept: the daemon logs a `wake` event, waits ~8 s for the network, re-checks Chrome and Flow, then carries on. Every portal request has a timeout, so a connection that died in sleep can't hang the loop.
+- **One log, three places.** Each event goes to `~/Flow/logs/<source>-YYYY-MM-DD.jsonl` (kept 14 days), to the human-readable `~/Flow/build-log.md`, and to the portal's `flow_events` table. While the portal is unreachable, events wait in `~/Flow/outbox.jsonl` and are flushed in order on reconnect (the portal ignores repeats), so the portal's story has no gaps. Look in the portal's Today tile ("Flow activity") or `tail -f ~/Flow/logs/daemon-$(date +%F).jsonl`.
+- **Watchdog.** `com.tohraan.flow-watchdog` runs every minute; the daemon touches `~/Flow/heartbeat` every loop, and a heartbeat older than 3 minutes while the Mac is awake gets the daemon restarted (`launchctl kickstart -k`).
+- **Lid closed.** A closed lid sleeps a Mac, so nothing can run. Either let the queue wait ("queue and catch up"), or on the charger run `./flow-away-mode.command on` (`pmset -a disablesleep 1`; `off` to undo, `status` to check). The watchdog logs a warning if it's on and the battery drops under 20%.
+- **Email.** The portal (not the Mac) sends the alerts, since the Mac is the thing that may be down: Mac away with images queued for 15 min (repeated at 2 h, then daily), Google signed out, an image that failed for good, and a recovery notice. Setup is in the portal repo (`GMAIL_USER`, `GMAIL_APP_PASSWORD`, `ALERT_EMAIL_TO`).
+
+Needs the portal on the `flow-resilience` queue (leases, `/events`). Daemon v1 (`flow-daemon.mjs`) is kept for portals without it.
+
 ## Known gotchas
 
 1. **`element.click()` does not register** on Flow's UI — always dispatch a real `Input.dispatchMouseEvent` at the element's actual coordinates.
@@ -190,6 +204,8 @@ No browser automation framework, no binary downloads, no bundler — just the pr
 5. **The Upload media button can silently stop working.** Clicking it normally produces a real `<input type=file>` you can inject into (confirmed working). But after triggering heavy background activity — e.g. several `--reference` runs in a row, which appears to spawn a large background Character-generation job — the same click can start registering a hover/focus state with no file input ever appearing, and no native file-chooser event fires either (checked directly via `Page.setInterceptFileChooserDialog`). Root cause unconfirmed; suspected resource contention on a busy project rather than a broken selector. `flow-upload-reference.mjs` retries 3 times before failing with a clear error — if it still fails, check whether the project is mid-generation first.
 6. **The `@` picker can take seconds to find a reference on a busy project.** A fixed short wait failed every request with "Reference asset not found". `--reference` now polls for "Add to prompt" for up to 8 seconds, tries three times, and if the asset still doesn't appear it saves `~/Flow/downloads/reference-missing-<time>.png` and lists the buttons on screen in the error — check that the asset still exists under that exact name.
 7. **`history.back()` can navigate out of your project entirely** if enough browser history has accumulated from reloads/navigations — it took us to a completely unrelated older project once. Always navigate back to your pinned project via its full URL (`location.href = projectUrl` / `Page.navigate`) instead of relying on back-navigation.
+8. **After sleep the first poll often fails with `ENOTFOUND`.** Wi-Fi and DNS aren't back the instant the lid opens. That is normal; the daemon waits and retries, and the portal treats such errors as "not ready" (no attempt spent).
+9. **A closed lid sleeps the Mac regardless of the daemon.** `caffeinate` only stops *idle* sleep. Use away mode (on the charger) if images must be made with the lid shut.
 
 ## Contributing
 
