@@ -2,6 +2,22 @@
 
 Newest first.
 
+## 2026-10-30: Completion without a % marker; owner resume goes through a Flow check
+
+- Evidence: a read-only CDP observer during a live run saw tile labels 0%→100% within 25 s, then new images at `flow-content.google/image/…`, while three "40%" strings from prompt text stayed on the page forever. The earlier timeouts were false negatives; the 29 Oct batches are in the Flow library.
+- A fresh batch at the top of the grid that is stable for 3 polls counts as complete even if no % was seen. Old tiles that scroll into view land below known ones, so they cannot qualify. Rejected: dropping the freshness check, or matching any large image.
+- The portal's Resume Flow does not clear the pause by itself. The daemon looks at Flow first and refuses on a warning, sign-in page, failed card, wrong page or missing prompt box, and says why on the portal. Rejected: auto-resume on a timer (a provider warning must not be retried blindly).
+
+## 2026-10-28: Provider blocks require explicit recovery
+
+- Confirmed from installed LaunchAgent: production still uses daemon v1. Logs show repeated child timeouts and a completion message followed by failed download. The generator never inspected warning text and reported success after its deadline; this can select an older output. Dedicated profile Preferences has no registered extension entries. This does not prove Google's trigger.
+- Google documents this exact warning at https://support.google.com/flow/answer/16353333?hl=en and recommends waiting a couple of minutes and disabling VPNs/proxies (checked 28 Oct 2026).
+- Persist a local pause on unusual activity, limits, failed tiles, or an uncertain outcome. Both daemon versions check in without claiming new work. Resume only after an operator confirms a successful manual generation; no timed retry of a protection warning.
+- Success requires observed progress ending with a loaded, fresh Flow output. Compare asset identities independent of thumbnail size/query. Fail closed if Flow changes its output URL scheme.
+- Keep v1 installed; do not deploy the unrelated unmerged resilience branch or its migrations. Lower v2 default concurrency to one for the later upgrade.
+- Rejected input camouflage, fingerprint/proxy rotation, blind retries, and promises that the provider warning can never recur. No browser profile reset, extension disabling, security setting change, or Google generation is performed by this repair.
+- Remaining: manual recovery test in the affected Flow window. If it still fails, provider/account/network diagnosis is needed; the local worker cannot clear Google's block.
+
 ## 2026-10-27: A sleeping Mac is a wait, not a failure
 
 - **Requirement:** images are made whether the laptop is open or closed, and the portal never shows an error because the Mac was away. Email should reach the owner when a human is needed.

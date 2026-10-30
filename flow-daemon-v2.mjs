@@ -2,7 +2,7 @@
 // flow-daemon-v2.mjs — parallel replacement for flow-daemon.mjs.
 //
 // What changed from v1 (see LinkedIn Command Center docs/DECISIONS.md, 26 Oct 2026):
-//  - up to FLOW_CONCURRENCY (default 4) images at once, each in its own Flow tab;
+//  - up to FLOW_CONCURRENCY (default 1) images at once, each in its own Flow tab;
 //  - every claimed request carries a lease the portal reclaims if this process dies;
 //    a timer renews it every 30 s while the image generates;
 //  - readiness check: if Chrome/Flow isn't reachable, it says so in its heartbeat,
@@ -27,12 +27,13 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { harvestLockHeld, hashFile, loadPortalEnv, openHelperTab, portal, sleep } from './flow-lib.mjs';
 import { createLogger, tidyLogs } from './flow-log.mjs';
+import { readPause, needsPause, pauseGeneration } from './flow-safety.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
 const POLL_INTERVAL_MS = Number(process.env.FLOW_POLL_INTERVAL_MS || 15000);
-const CONFIGURED = Math.max(1, Math.min(6, Number(process.env.FLOW_CONCURRENCY || 4)));
+const CONFIGURED = Math.max(1, Math.min(6, Number(process.env.FLOW_CONCURRENCY || 1)));
 const FAKE = process.env.FLOW_FAKE === '1';
 const FAKE_FAIL = Number(process.env.FLOW_FAKE_FAIL || 0.2);
 const FAKE_MIN_MS = Number(process.env.FLOW_FAKE_MIN_MS || 5000);
@@ -41,7 +42,7 @@ const CDP = 'http://127.0.0.1:9222';
 const WORKER = `${hostname()}-${process.pid}`;
 const BUILD_LOG = path.join(homedir(), 'Flow', 'build-log.md');
 const BRAKE_MS = 15 * 60_000;
-const THROTTLE = /\b429\b|too many requests|rate.?limit|unusual traffic|try again later|quota/i;
+const THROTTLE = /\b429\b|too many requests|rate.?limit|unusual (?:traffic|activity)|try again later|quota/i;
 
 let api;
 let shuttingDown = false;
@@ -161,7 +162,9 @@ async function generate(req, tab) {
     ({ stdout, stderr } = await execFileAsync(process.execPath, args, { cwd: __dirname, timeout: 480000 }));
   } catch (err) {
     const detail = [err.stdout, err.stderr].filter(Boolean).join('\n').slice(0, 1500);
-    throw new Error(`flow-generate.mjs failed: ${detail || err.message}`);
+    const failure = new Error(`flow-generate.mjs failed: ${err.killed ? 'FLOW_GENERATION_TIMEOUT: child timed out; outcome unknown. ' : ''}${detail || err.message}`);
+    failure.killed = err.killed;
+    throw failure;
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -214,6 +217,7 @@ async function fulfill(req, tab) {
       await result.cleanup().catch(() => {});
     }
   } catch (err) {
+    if (!FAKE && needsPause(err)) await pauseGeneration(err.message);
     await log(`FAILED: ${err.message}`.slice(0, 600), { kind: 'request_failed', level: 'warn', requestId: req.id, detail: { message: err.message.slice(0, 1500) } });
     if (THROTTLE.test(err.message) && Date.now() >= brakeUntil) {
       brakeUntil = Date.now() + BRAKE_MS;
@@ -243,7 +247,8 @@ async function main() {
       lastTick = Date.now();
       await touchHeartbeat();
       const harvesting = await harvestLockHeld();
-      const flow = await checkFlow(concurrency());
+      const paused = FAKE ? null : await readPause();
+      const flow = paused ? { ready: false, reason: `Flow paused: ${paused.reason}`, tabs: [] } : await checkFlow(concurrency());
       if (flow.ready !== lastReady) {
         await log(flow.ready ? 'Chrome and Flow are ready' : `Flow not ready: ${flow.reason}`, { kind: flow.ready ? 'flow_ready' : 'flow_not_ready', level: flow.ready ? 'info' : 'warn' });
         lastReady = flow.ready;

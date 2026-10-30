@@ -46,6 +46,21 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import { assertQaAvailable, runQa, formatQaLine, verdictFor } from './flow-qa.mjs';
 import { clickTarget, downloadAt, positionTarget, ensureFlow } from './flow-lib.mjs';
+import { assertNotPaused, generationState, needsPause, pauseGeneration, waitForGeneration, FlowSafetyError } from './flow-safety.mjs';
+
+// Only actual, loaded Flow output thumbnails count as generation results.
+// Flow served outputs from flow.google.com/asb/ until late Oct 2026; new
+// outputs now load from flow-content.google/image/<uuid> (older tiles keep
+// the /asb/ URL), so both are outputs.
+const OUTPUT_IMAGES = String.raw`Array.from(document.querySelectorAll('img')).filter(el => {
+  const r = el.getBoundingClientRect();
+  return r.width > 50 && r.height > 50 && /^https:\/\/(?:flow\.google\.com\/asb\/|flow-content\.google\/image\/)/.test(el.currentSrc || el.src || '');
+})`;
+// A tile's progress is a label that is exactly "NN%". The whole page text is
+// not used: each batch card echoes its prompt, and prompts say things like
+// "fills at least 40% of the frame", which never goes away.
+const PROGRESS = String.raw`Array.from(document.querySelectorAll('div, span, p')).filter(el => el.children.length === 0 && /^\d{1,3}%$/.test((el.textContent || '').trim()) && el.getBoundingClientRect().width > 0).length`;
+const SNAPSHOT = `(() => ({ text: document.body.innerText, progress: ${PROGRESS}, images: (${OUTPUT_IMAGES}).filter(el => el.complete && el.naturalWidth > 0).map(el => ({ el, r: el.getBoundingClientRect() })).sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x).map(({ el }) => el.currentSrc || el.src), knownImages: (${OUTPUT_IMAGES}).map(el => el.currentSrc || el.src) }))()`;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 9222;
@@ -229,6 +244,7 @@ async function main() {
     process.exit(1);
   }
   const label = flags.label || (flags.file ? path.basename(flags.file, path.extname(flags.file)) : 'untitled');
+  await assertNotPaused();
   const projectUrl = await resolveProjectUrl(flags.project);
   if (flags.qa) await assertQaAvailable();
 
@@ -246,6 +262,9 @@ async function main() {
         await sleep(250);
       }
     }
+
+    // Stop before touching the composer if Flow already shows a warning.
+    generationState(await evalJson(send, SNAPSHOT), new Set());
 
     // 2. Clear any leftover prompt text, then focus the box
     await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
@@ -265,21 +284,24 @@ async function main() {
     // 5. Click Start generation (real CDP mouse event — JS .click() does not register on this app)
     const genPos = await positionTarget(send, `document.querySelector('button[aria-label="Start generation"]')`);
     if (!genPos) throw new Error('Start generation button not found or not visible');
+    await assertNotPaused(); // also catches a pause set by another worker
+    const before = await evalJson(send, SNAPSHOT);
+    generationState(before, new Set());
+    const baseline = new Set(before.knownImages);
     await clickTarget(send, `document.querySelector('button[aria-label="Start generation"]')`);
     console.log(`[${label}] Submitted. Waiting for generation...`);
+    let lastState = '';
 
-    // 6. Poll for completion: wait for % markers to appear, then disappear.
-    // The grid thumbnails take a couple more seconds to actually paint after
-    // the % markers vanish, so a fixed settle delay follows before screenshotting.
-    let sawProgress = false;
-    const deadline = Date.now() + 180000;
-    while (Date.now() < deadline) {
-      await sleep(1500);
-      const pct = await evalJson(send, `(() => { const m = document.body.innerText.match(/\\d+%/g); return m ? m.length : 0; })()`);
-      if (pct > 0) sawProgress = true;
-      if (sawProgress && pct === 0) break;
-    }
+    // 6. Require progress AND a loaded, new output. A warning or unknown
+    // outcome pauses all workers; an old image can never satisfy completion.
+    const freshSources = await waitForGeneration({
+      observe: () => evalJson(send, SNAPSHOT), baseline, sleep,
+      // One stderr line per change, so a timeout shows what Flow displayed.
+      onState: (s) => { const k = `${s.progress}/${s.fresh}`; if (k !== lastState) console.error(`[${label}] observed: progress markers ${s.progress}, new top images ${s.fresh}`); lastState = k; },
+    });
     await sleep(3000);
+    generationState(await evalJson(send, SNAPSHOT), baseline);
+    const freshImagesExpression = `(${OUTPUT_IMAGES}).filter(el => ${JSON.stringify(freshSources)}.includes(el.currentSrc || el.src))`;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`[${label}] Generation finished in ${elapsed}s.`);
 
@@ -299,7 +321,7 @@ async function main() {
       let tiles = [];
       try {
         tiles = await evalJson(send, `(() => {
-          const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50)
+          const imgs = (${freshImagesExpression})
             .map(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, src: el.currentSrc || el.src || '' }; });
           imgs.sort((a,b) => a.y - b.y || a.x - b.x);
           return imgs.slice(0, 4);
@@ -346,14 +368,14 @@ async function main() {
     if (flags.download != null && !Number.isNaN(flags.download)) {
       const n = flags.download;
       const imageExpression = `(() => {
-        const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50);
+        const imgs = (${freshImagesExpression});
         imgs.sort((a,b) => { const ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect(); return ra.y-rb.y || ra.x-rb.x; });
         return imgs[${n}] || null;
       })()`;
       // Flow's URL for the downloaded tile, so the portal's library can tell a
       // later harvest that this image is already in it.
       const tileSrc = await evalJson(send, `(() => {
-        const imgs = Array.from(document.querySelectorAll('img')).filter(el => el.getBoundingClientRect().width > 50);
+        const imgs = (${freshImagesExpression});
         imgs.sort((a,b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y || a.getBoundingClientRect().x - b.getBoundingClientRect().x);
         const el = imgs[${n}];
         return el ? (el.currentSrc || el.src || '') : '';
@@ -365,7 +387,7 @@ async function main() {
         console.log(`[${label}] ${downloadedNote}`);
       } else {
         downloadedNote = `No image at index ${n}`;
-        console.error(`[${label}] ${downloadedNote}`);
+        throw new FlowSafetyError('FLOW_DOWNLOAD_UNCERTAIN', downloadedNote + '; do not regenerate an already completed image.');
       }
     }
 
@@ -381,7 +403,8 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
+  if (needsPause(err)) await pauseGeneration(err.message, err.code || 'FLOW_PROVIDER_BLOCKED');
   console.error('Failed:', err.message);
   process.exit(1);
 });

@@ -31,6 +31,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { harvestLockHeld, hashFile, loadPortalEnv, openHelperTab, portal, sleep } from './flow-lib.mjs';
 
+import { readPause, needsPause, pauseGeneration, resumeGeneration } from './flow-safety.mjs';
+import { checkFlowForResume } from './flow-resume.mjs';
+
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
@@ -52,8 +55,22 @@ async function log(line) {
 // Flow's per-image URL identifies a tile for a later harvest; blob:/data: URLs don't.
 const tileKey = (src) => (src && /^https?:/.test(src) ? src.slice(0, 500) : null);
 
+// The Mac's connection to the portal drops now and then (UND_ERR_CONNECT_TIMEOUT
+// after sleep or Wi-Fi changes). A lost /complete or /fail leaves the request
+// "processing" for 20 minutes, so report results a few times before giving up.
+// Both endpoints are idempotent.
+async function withRetry(what, fn, waits = [5000, 15000, 45000]) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); } catch (err) {
+      if (i >= waits.length || /HTTP 4\d\d/.test(err.message)) throw err;
+      console.error(`${what} failed (${err.cause?.code ?? err.message.slice(0, 80)}); retrying in ${waits[i] / 1000}s`);
+      await sleep(waits[i]);
+    }
+  }
+}
+
 async function reportFailed(requestId, errorMessage) {
-  await api.postJson('/api/flow-queue/fail', { request_id: requestId, error: errorMessage }).catch(() => {});
+  await withRetry('report failure', () => api.postJson('/api/flow-queue/fail', { request_id: requestId, error: errorMessage })).catch(() => {});
 }
 
 async function hashOf(file) {
@@ -85,7 +102,9 @@ async function fulfillOne(req) {
     // flow-generate.mjs's own stdout/stderr (attached by execFile on a
     // non-zero exit) has the real error; err.message is just the command.
     const detail = [err.stdout, err.stderr].filter(Boolean).join('\n').slice(0, 1500);
-    throw new Error(`flow-generate.mjs failed: ${detail || err.message}`);
+    const failure = new Error(`flow-generate.mjs failed: ${err.killed ? 'FLOW_GENERATION_TIMEOUT: child timed out; outcome unknown. ' : ''}${detail || err.message}`);
+    failure.killed = err.killed;
+    throw failure;
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -99,13 +118,13 @@ async function fulfillOne(req) {
   const full = await hashOf(downloadedPath);
   const tileSrc = stdout.match(/^TILE_SRC: (.+)$/m)?.[1]?.trim();
   await log(`[${req.id}] saved -> ${downloadedPath}`);
-  await api.postForm('/api/flow-queue/complete', {
+  await withRetry('report completion', () => api.postForm('/api/flow-queue/complete', {
     request_id: req.id,
     thumb_key: tileKey(tileSrc),
     dhash: full?.hash,
     width: full?.width,
     height: full?.height,
-  }, downloadedPath);
+  }, downloadedPath));
 }
 
 async function main() {
@@ -113,19 +132,50 @@ async function main() {
   console.log(`flow-daemon: polling every ${POLL_INTERVAL_MS}ms. Ctrl+C to stop.`);
   const query = (claim, harvesting) => `/api/flow-queue/pending?claim=${claim}&limit=1${harvesting ? '&harvesting=1' : ''}`;
 
+  let pauseLogged = false;
+  // The portal's "Resume Flow" request: the last one checked, and the answer
+  // still to be sent back (on the next poll, whatever kind it is).
+  let resumeTried = null;
+  let resumeAnswer = '';
   while (!shuttingDown) {
     let worked = false;
     try {
-      if (await harvestLockHeld()) {
+      const paused = await readPause();
+      if (paused) {
+        if (!pauseLogged) await log(`PAUSED: ${paused.reason}. Use flow-control.mjs status for recovery instructions, or Resume Flow on the portal's Today page.`);
+        pauseLogged = true;
+        await writeFile(path.join(homedir(), 'Flow', 'heartbeat'), String(Date.now()));
+        const res = await api.get(query(0, false) + '&flow_ready=0&flow_reason=' + encodeURIComponent('Flow paused: ' + paused.reason) + '&paused_at=' + encodeURIComponent(paused.paused_at ?? '') + resumeAnswer);
+        resumeAnswer = '';
+        const asked = res?.resume_requested_at;
+        if (asked && asked !== resumeTried) {
+          // The owner asked from the portal. Still look at Flow first: never
+          // resume into a warning, a sign-in page or a failed card.
+          resumeTried = asked;
+          const verdict = await checkFlowForResume();
+          if (verdict.ok) {
+            await resumeGeneration();
+            await log(`RESUMED from the portal (requested ${asked}); Flow looked ready.`);
+          } else {
+            await log(`Resume requested from the portal (${asked}) but not done: ${verdict.reason}`);
+          }
+          resumeAnswer = `&resume_ack=${encodeURIComponent(asked)}&resume_result=${verdict.ok ? 'resumed' : 'refused'}${verdict.ok ? '' : '&resume_detail=' + encodeURIComponent(verdict.reason)}`;
+          continue; // answer on the next poll straight away
+        }
+      } else if (await harvestLockHeld()) {
         // Still check in, so waiting posts know the daemon is alive.
-        await api.get(query(0, true));
+        await api.get(query(0, true) + resumeAnswer);
+        resumeAnswer = '';
       } else {
-        const { requests } = await api.get(query(1, false));
+        pauseLogged = false;
+        const { requests } = await api.get(query(1, false) + '&flow_ready=1' + resumeAnswer);
+        resumeAnswer = '';
         for (const req of requests) {
           worked = true;
           try {
             await fulfillOne(req);
           } catch (err) {
+            if (needsPause(err)) await pauseGeneration(err.message);
             await log(`[${req.id}] FAILED: ${err.message}`);
             await reportFailed(req.id, err.message);
           }

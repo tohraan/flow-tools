@@ -33,6 +33,27 @@ It was originally built to work entirely without a physical keyboard — every k
 - 📝 **Automatic run history** — every generation is logged with its prompt, timing, and result
 - 🪶 **Zero dependencies** — built entirely on Node 22's built-in `fetch` and `WebSocket`
 
+## When Flow reports unusual activity
+
+The worker pauses all new submissions when Flow displays unusual activity, a rate/credit limit, a failed generation card, or when completion/download is uncertain. The pause is stored in `~/Flow/generation-pause.json` and survives restarts. Pending jobs stay queued; the currently claimed job may already have consumed an attempt in the legacy portal. Both daemons keep checking in without claiming while paused. Do not run another generator or repeatedly click Retry to work around this state.
+
+```bash
+node ~/flow-tools/flow-control.mjs status
+node ~/flow-tools/flow-control.mjs pause
+```
+
+Google's [Flow help](https://support.google.com/flow/answer/16353333?hl=en) recommends waiting a couple of minutes and disabling VPNs/proxies for this exact warning. Check any page-modifying extensions in the **Flow profile**, and test one generation by hand in that same window. Do not disable security controls or use stealth/fingerprint/proxy rotation. If manual generation still fails, leave the worker paused and use Flow's Help/Feedback or Google One support. Browser-side changes cannot guarantee that Google's warning never recurs.
+
+After a successful manual generation, dismiss obsolete failed tiles so their warning text no longer appears, then explicitly resume:
+
+```bash
+node ~/flow-tools/flow-control.mjs resume --manual-check-passed
+```
+
+This flag records the operator's recovery check; it does not perform that check. Persistent warnings immediately pause the worker again. There is no timed auto-resume of a provider block. Generation must show progress ending with a loaded new Flow output; a timeout or an older thumbnail is never accepted as success. The v2 worker now defaults to one concurrent job; it remains a separate portal upgrade and is not enabled by this fix.
+
+Offline regression checks (no Google calls or generation credits): `node --test tests/flow-safety.test.mjs`.
+
 ## Prerequisites
 
 - **Node 22+** (for built-in `WebSocket`/`fetch` — check with `node -e "console.log(typeof WebSocket)"` → should print `function`)
