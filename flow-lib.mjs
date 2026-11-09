@@ -61,40 +61,71 @@ export async function ensureFlow(port = PORT, match = FLOW_MATCH, timeoutMs = 45
   throw new Error(`Chrome/Flow not ready on port ${port} after ${timeoutMs / 1000}s (ran flow-launch-chrome.sh).`);
 }
 
-function wire(ws) {
+export function wire(ws, timeoutMs = 30_000) {
   let id = 0;
+  let disconnected = false;
   const pending = new Map();
+  const disconnect = () => {
+    disconnected = true;
+    for (const request of pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(new Error('FLOW_CDP_DISCONNECTED: browser connection closed; generation outcome may be unknown.'));
+    }
+    pending.clear();
+  };
+  ws.addEventListener('close', disconnect);
+  ws.addEventListener('error', disconnect);
   ws.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.id != null && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) reject(new Error(msg.error.message));
-      else resolve(msg.result);
-    }
+    const request = pending.get(msg.id);
+    if (!request) return;
+    clearTimeout(request.timer);
+    pending.delete(msg.id);
+    if (msg.error) request.reject(new Error(msg.error.message));
+    else request.resolve(msg.result);
   });
   return (method, params = {}) => new Promise((resolve, reject) => {
+    if (disconnected) return reject(new Error('FLOW_CDP_DISCONNECTED: browser connection is closed.'));
     const msgId = ++id;
-    pending.set(msgId, { resolve, reject });
-    ws.send(JSON.stringify({ id: msgId, method, params }));
+    const timer = setTimeout(() => {
+      pending.delete(msgId);
+      reject(new Error(`FLOW_CDP_TIMEOUT: ${method} timed out after ${timeoutMs}ms; generation outcome may be unknown.`));
+    }, timeoutMs);
+    pending.set(msgId, { resolve, reject, timer });
+    try { ws.send(JSON.stringify({ id: msgId, method, params })); }
+    catch { clearTimeout(timer); pending.delete(msgId); reject(new Error(`FLOW_CDP_DISCONNECTED: ${method} could not be sent; generation outcome may be unknown.`)); }
   });
 }
 
-async function open(wsUrl) {
+export async function openCdp(wsUrl, timeoutMs = 10_000) {
   const ws = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => {
-    ws.addEventListener('open', () => resolve());
-    ws.addEventListener('error', reject);
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.removeEventListener('open', opened);
+      ws.removeEventListener('error', failed);
+      ws.removeEventListener('close', failed);
+    };
+    const opened = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new Error('FLOW_CDP_DISCONNECTED: browser connection did not open.')); };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('FLOW_CDP_TIMEOUT: browser connection timed out.'));
+      try { ws.close(); } catch {}
+    }, timeoutMs);
+    ws.addEventListener('open', opened);
+    ws.addEventListener('error', failed);
+    ws.addEventListener('close', failed);
   });
   return { ws, send: wire(ws) };
 }
 
-export async function connectTab(match = FLOW_MATCH, port = PORT) {
+export async function connectTab(match = FLOW_MATCH, port = PORT, tabId) {
   await ensureFlow(port, match);
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const target = targets.filter((t) => t.type === 'page').find((t) => t.url.includes(match));
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) })).json();
+  const target = targets.filter((t) => t.type === 'page').find((t) => tabId ? t.id === tabId : t.url.includes(match));
   if (!target) throw new Error(`No tab matching "${match}" on port ${port}. Is Chrome running? (flow-launch-chrome.sh)`);
-  return { ...(await open(target.webSocketDebuggerUrl)), target };
+  return { ...(await openCdp(target.webSocketDebuggerUrl)), target };
 }
 
 // A blank tab for decoding images into a canvas. Images go in as data: URIs,
@@ -103,7 +134,7 @@ export async function openHelperTab(port = PORT) {
   let res = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
   if (!res.ok) res = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`);
   const target = await res.json();
-  const { ws, send } = await open(target.webSocketDebuggerUrl);
+  const { ws, send } = await openCdp(target.webSocketDebuggerUrl);
   return {
     send,
     async close() {
@@ -130,11 +161,11 @@ export async function clickAt(send, x, y, button = 'left') {
 // the target element; we scroll it to a consistent viewport position, measure
 // it again, validate the hit point, then send real CDP input at that point.
 export async function positionTarget(send, targetExpression) {
-  return evalJson(send, `(async () => {
+  return evalJson(send, `(() => {
     const el = (${targetExpression});
     if (!el || !el.isConnected) return null;
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    // Reading the bounds forces layout; animation frames can stop in hidden tabs.
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2, y = r.top + r.height / 2;
     if (r.width <= 0 || r.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;

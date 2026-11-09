@@ -2,6 +2,13 @@
 
 Newest first. Dates are Asia/Dubai.
 
+## 2026-11-09: Bound browser waits in background tabs
+
+- Remove the double animation-frame wait after instant scrolling; reading target bounds forces layout even when a background tab stops painting.
+- Share one WebSocket connection implementation across generator, daemon and harvester. Opening and commands have deadlines; close/error rejects pending work and clears timers. Browser timeouts/disconnects still pause generation conservatively.
+- Log preparation, reference selection, typing and submission stages without logging prompt content, so future stalls identify their stage.
+- Offline tests cover lost replies, disconnects, socket failures, handshake expiry and positioning without animation frames. Live recovery is recorded separately after observation.
+
 ## 2026-10-30: Flow's new output URLs; Resume Flow from the portal
 
 - **Root cause of every "timeout" since 28 Oct:** Flow now loads new outputs from `flow-content.google/image/<uuid>` (old tiles keep `flow.google.com/asb/`), and each batch card echoes its prompt, whose text contains "40%" ("fills at least 40% of the frame"). The generator only counted `/asb/` images as outputs and read progress from any "NN%" in the page text, so it never saw the new image and never saw progress end. Every generation succeeded in Flow and was reported as an unknown-outcome timeout, which (correctly) paused the worker.

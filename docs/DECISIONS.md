@@ -2,6 +2,10 @@
 
 Newest first.
 
+## 2026-11-09: Browser commands must finish or fail closed
+
+Repeated eight-minute child timeouts had no stage output. The inspected Flow project was idle with an empty composer and old tiles; this suggests a pre-submit stall, but does not prove where the old request stopped. The code contained an unbounded double animation-frame wait, which a hidden tab can suspend, plus unbounded CDP handshakes/commands. Remove the frame wait after instant scrolling (bounds reads force layout), reuse the shared connection and bound handshake/commands. Preserve warnings, fresh-image correlation and pause on uncertain results. Do not auto-resume old timeouts. Add bounded stage diagnostics; never log prompt contents or credentials.
+
 ## 2026-10-30: Completion without a % marker; owner resume goes through a Flow check
 
 - Evidence: a read-only CDP observer during a live run saw tile labels 0%→100% within 25 s, then new images at `flow-content.google/image/…`, while three "40%" strings from prompt text stayed on the page forever. The earlier timeouts were false negatives; the 29 Oct batches are in the Flow library.

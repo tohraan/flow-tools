@@ -52,7 +52,7 @@ export const resumeGeneration = (file = PAUSE_FILE) => rm(file, { force: true })
 export function needsPause(error) {
   const message = String(error?.message ?? error);
   return error instanceof FlowSafetyError || WARNING.test(message) || error?.killed ||
-    /FLOW_(?:PROVIDER_BLOCKED|GENERATION_FAILED|GENERATION_TIMEOUT|DOWNLOAD_UNCERTAIN)|no new file appeared|no download path|timed?\s*out|ETIMEDOUT/i.test(message);
+    /FLOW_(?:PROVIDER_BLOCKED|GENERATION_FAILED|GENERATION_TIMEOUT|DOWNLOAD_UNCERTAIN|CDP_TIMEOUT|CDP_DISCONNECTED)|no new file appeared|no download path|timed?\s*out|ETIMEDOUT/i.test(message);
 }
 
 // Flow lists the newest batch first. Images arrive in on-screen order, so a

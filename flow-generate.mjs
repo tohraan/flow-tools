@@ -45,7 +45,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import { assertQaAvailable, runQa, formatQaLine, verdictFor } from './flow-qa.mjs';
-import { clickTarget, downloadAt, positionTarget, ensureFlow } from './flow-lib.mjs';
+import { clickTarget, downloadAt, positionTarget, connectTab } from './flow-lib.mjs';
 import { assertNotPaused, generationState, needsPause, pauseGeneration, waitForGeneration, FlowSafetyError } from './flow-safety.mjs';
 
 // Only actual, loaded Flow output thumbnails count as generation results.
@@ -136,40 +136,6 @@ async function waitAndMoveDownload(since, timeoutMs = 20000) {
   return null;
 }
 
-async function connect(port, match, tabId) {
-  await ensureFlow(port, match);
-  const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-  const targets = await res.json();
-  const pages = targets.filter((t) => t.type === 'page');
-  // --tab pins this run to one Flow tab so several runs can work side by side.
-  const target = tabId ? pages.find((t) => t.id === tabId) : pages.find((t) => t.url.includes(match));
-  if (!target) throw new Error(`No tab matching "${match}" on port ${port}. Is Chrome running? (flow-launch-chrome.sh)`);
-
-  const ws = new WebSocket(target.webSocketDebuggerUrl);
-  let id = 0;
-  const pending = new Map();
-  ws.addEventListener('message', (ev) => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id != null && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) reject(new Error(msg.error.message));
-      else resolve(msg.result);
-    }
-  });
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', () => resolve());
-    ws.addEventListener('error', reject);
-  });
-  function send(method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const msgId = ++id;
-      pending.set(msgId, { resolve, reject });
-      ws.send(JSON.stringify({ id: msgId, method, params }));
-    });
-  }
-  return { ws, send, target };
-}
 
 async function clickAt(send, x, y, button = 'left') {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
@@ -248,7 +214,8 @@ async function main() {
   const projectUrl = await resolveProjectUrl(flags.project);
   if (flags.qa) await assertQaAvailable();
 
-  const { ws, send } = await connect(PORT, MATCH, flags.tab);
+  console.error(`[${label}] Connecting to Flow.`);
+  const { ws, send } = await connectTab(MATCH, PORT, flags.tab);
 
   try {
     // 1. Make sure we're on the pinned project (skip navigation if already there — saves time)
@@ -266,6 +233,7 @@ async function main() {
     // Stop before touching the composer if Flow already shows a warning.
     generationState(await evalJson(send, SNAPSHOT), new Set());
 
+    console.error(`[${label}] Preparing composer.`);
     // 2. Clear any leftover prompt text, then focus the box
     await clickTarget(send, `document.querySelector('button[aria-label="Clear prompt"]')`).catch(() => {});
     const promptBoxExpression = `Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim()==='What do you want to create?')`;
@@ -276,9 +244,13 @@ async function main() {
 
     // 3. If a reference asset was requested, insert it as an inline @mention FIRST —
     // this is what actually binds identity (a loose "+" ingredient attachment does not).
-    if (flags.reference) await insertReference(send, flags.reference, boxPos, label);
+    if (flags.reference) {
+      console.error(`[${label}] Selecting identity reference.`);
+      await insertReference(send, flags.reference, boxPos, label);
+    }
 
     // 4. Type the prompt (continues right after the mention chip, if any)
+    console.error(`[${label}] Typing photo prompt.`);
     await send('Input.insertText', { text });
 
     // 5. Click Start generation (real CDP mouse event — JS .click() does not register on this app)
@@ -288,6 +260,7 @@ async function main() {
     const before = await evalJson(send, SNAPSHOT);
     generationState(before, new Set());
     const baseline = new Set(before.knownImages);
+    console.error(`[${label}] Submitting generation; a failed browser response may leave the outcome unknown.`);
     await clickTarget(send, `document.querySelector('button[aria-label="Start generation"]')`);
     console.log(`[${label}] Submitted. Waiting for generation...`);
     let lastState = '';
