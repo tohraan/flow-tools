@@ -49,6 +49,13 @@ export async function assertNotPaused(file = PAUSE_FILE) {
 
 export const resumeGeneration = (file = PAUSE_FILE) => rm(file, { force: true });
 
+/** Keep the actionable child error before progress logs in the portal's short pause reason. */
+export function childFailureDetail(error) {
+  const output = [error.stderr, error.stdout].filter(Boolean).join('\n');
+  const failure = output.split(/\r?\n/).findLast(line => line.startsWith('Failed:'));
+  return [failure, output || error.message].filter(Boolean).join('\n').slice(0, 1500);
+}
+
 export function needsPause(error) {
   const message = String(error?.message ?? error);
   return error instanceof FlowSafetyError || WARNING.test(message) || error?.killed ||

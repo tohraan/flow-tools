@@ -31,7 +31,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { harvestLockHeld, hashFile, loadPortalEnv, openHelperTab, portal, sleep } from './flow-lib.mjs';
 
-import { readPause, needsPause, pauseGeneration, resumeGeneration } from './flow-safety.mjs';
+import { childFailureDetail, readPause, needsPause, pauseGeneration, resumeGeneration } from './flow-safety.mjs';
 import { checkFlowForResume } from './flow-resume.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -101,7 +101,7 @@ async function fulfillOne(req) {
   } catch (err) {
     // flow-generate.mjs's own stdout/stderr (attached by execFile on a
     // non-zero exit) has the real error; err.message is just the command.
-    const detail = [err.stdout, err.stderr].filter(Boolean).join('\n').slice(0, 1500);
+    const detail = childFailureDetail(err);
     const failure = new Error(`flow-generate.mjs failed: ${err.killed ? 'FLOW_GENERATION_TIMEOUT: child timed out; outcome unknown. ' : ''}${detail || err.message}`);
     failure.killed = err.killed;
     throw failure;

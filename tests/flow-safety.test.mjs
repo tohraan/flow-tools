@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { assertNotPaused, generationState, needsPause, pauseGeneration, readPause, resumeGeneration, waitForGeneration } from '../flow-safety.mjs';
+import { childFailureDetail, assertNotPaused, generationState, needsPause, pauseGeneration, readPause, resumeGeneration, waitForGeneration } from '../flow-safety.mjs';
 
 test('exact screenshot warning and throttle variants stop even with a fresh image', () => {
   for (const text of ['We noticed some unusual activity. Note that browser extensions that modify the page may cause issues.', 'unusual traffic', '429 Too Many Requests', 'Rate limit exceeded', 'Not enough credits']) {
@@ -149,4 +149,11 @@ test('resume check refuses sign-in pages, warnings, failed cards and a missing p
   assert.equal(resumeVerdict({ ...ok, text: 'Failed\nYou have not been charged' }).ok, false);
   assert.equal(resumeVerdict({ ...ok, composer: false }).ok, false);
   assert.equal(resumeVerdict(null).ok, false);
+});
+
+
+test('the short portal pause reason retains the real child error before diagnostics', () => {
+  const error = {stderr:'stage diagnostics '.repeat(80)+'\nFailed: FLOW_PROVIDER_BLOCKED: Flow reported a provider warning.',stdout:'Submitted. Waiting for generation...'};
+  assert.match(childFailureDetail(error).slice(0,240), /^Failed: FLOW_PROVIDER_BLOCKED:/);
+  assert.equal(childFailureDetail({message:'Command failed'}), 'Command failed');
 });

@@ -7,7 +7,8 @@ Newest first. Dates are Asia/Dubai.
 - Remove the double animation-frame wait after instant scrolling; reading target bounds forces layout even when a background tab stops painting.
 - Share one WebSocket connection implementation across generator, daemon and harvester. Opening and commands have deadlines; close/error rejects pending work and clears timers. Browser timeouts/disconnects still pause generation conservatively.
 - Log preparation, reference selection, typing and submission stages without logging prompt content, so future stalls identify their stage.
-- Offline tests cover lost replies, disconnects, socket failures, handshake expiry and positioning without animation frames. Live recovery is recorded separately after observation.
+- Offline tests cover lost replies, disconnects, socket failures, handshake expiry, positioning without animation frames and actionable child-error ordering: 22 pass.
+- Live recovery passed the normal readiness check and saved a new 2K image. The next generation encountered a Flow provider warning; the worker correctly paused and remains paused. Put the actual child error before stage logs so the portal can explain this hold within its short reason.
 
 ## 2026-10-30: Flow's new output URLs; Resume Flow from the portal
 
